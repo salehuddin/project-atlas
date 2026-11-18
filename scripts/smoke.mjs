@@ -68,10 +68,19 @@ try {
     const vitals = await (await fetch(`${base}/vitals?directory=${encodeURIComponent(directory)}`, { headers })).json();
     console.log(`\n${directory}`);
     console.log(`  branch=${vitals.branch} kind=${vitals.kind} stack=[${vitals.stack.join(", ")}]`);
+    console.log(`  ahead=${vitals.ahead} behind=${vitals.behind} dirtySince=${vitals.dirtySince} detached=${vitals.detached}`);
     console.log(`  size=${vitals.size.state} deployments=${vitals.deployments.length}`);
     for (const deployment of vitals.deployments) {
-      console.log(`  deploy ${deployment.label.padEnd(9)} ${deployment.url} live=${deployment.live} (${deployment.source})`);
+      const cert = deployment.cert
+        ? ` cert(daysLeft=${deployment.cert.daysLeft} auth=${deployment.cert.authorized}${deployment.cert.error ? ` err=${deployment.cert.error}` : ""})`
+        : " cert=null";
+      console.log(`  deploy ${deployment.label.padEnd(9)} ${deployment.url} live=${deployment.live} ms=${deployment.ms}${cert} (${deployment.source})`);
     }
+
+    const git = await (await fetch(`${base}/git?directory=${encodeURIComponent(directory)}`, { headers })).json();
+    console.log(`  /git available=${git.available} total=${git.total} currentStreak=${git.currentStreak} bestStreak=${git.bestStreak} days=${git.days.length}`);
+    if (git.lastCommit) console.log(`  lastCommit ${git.lastCommit.hash} ${git.lastCommit.subject} (${new Date(git.lastCommit.at).toISOString()})`);
+    console.log(`  sync ahead=${git.ahead} behind=${git.behind} upstream=${git.upstream} dirtySince=${git.dirtySince} detached=${git.detached}`);
   }
 
   if (projectId && dirs[0]) {

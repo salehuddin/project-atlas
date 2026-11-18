@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+- **Git heatmap and health** — the project page gains a **Commits** panel (26-week
+  GitHub-style heatmap, streaks, last commit, sync state) served by a new `GET /git`
+  route. Cards show `↑N` / `↓N` chips for unpushed / behind commits and a `dirty Nd`
+  warning when uncommitted changes are at least 3 days old.
+- **Pins, groups and archive** — pin cards with the star, group them with the
+  `+ group` chip (header **Group: On/Off** renders Pinned / group / Ungrouped
+  sections), and **Hide** projects you do not want on the board. Pinned first in
+  "Needs me" sort; hidden projects leave the footer count.
+- **SSL and uptime for deployments** — probes now record response time and, for
+  `https` URLs, TLS certificate details (expiry, days left, issuer) via a short
+  `node:tls` handshake. Cards show a `cert 9d` / `cert expired` badge; the new
+  **Deployments** panel lists status, latency, cert dates, recent-check dots and
+  "down since", with a **Check now** button. Down or soon-expiring deployments
+  boost the "Needs me" sort. History is only "checks observed while Atlas is open",
+  capped at 40 entries per URL.
+
 ## Unreleased
 
 - README screenshots, generated from invented projects by a demo harness (`demo/`) that runs

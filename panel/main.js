@@ -1980,6 +1980,8 @@ ${GUEST_UI_LOOK_CSS}`;
   // src/panel/main.ts
   var SUMMARY_PREFIX = "atlas:v1:summary:";
   var SITE_PREFIX = "atlas:v1:site:";
+  var META_PREFIX = "atlas:v1:meta:";
+  var PROBE_PREFIX = "atlas:v1:probes:";
   var SETTINGS_KEY = "atlas:v1:settings";
   var SYSTEM_PROMPT = "You write project blurbs. Two sentences, at most 45 words. Say what the project is, its main stack, and how it ships. Plain text only: no markdown, no quotes, no preamble.";
   var host = connectHost();
@@ -1988,6 +1990,9 @@ ${GUEST_UI_LOOK_CSS}`;
     query: "",
     sort: "attention",
     ai: true,
+    groupOn: true,
+    collapsed: {},
+    showHidden: false,
     directory: null,
     surface: "panel",
     serviceDown: false,
@@ -1998,10 +2003,15 @@ ${GUEST_UI_LOOK_CSS}`;
     range: 30,
     activity: null,
     activityState: "idle",
-    activityFor: null
+    activityFor: null,
+    git: null,
+    gitState: "idle",
+    gitFor: null,
+    probes: /* @__PURE__ */ new Map()
   };
   var summaryCache = /* @__PURE__ */ new Map();
   var siteCache = /* @__PURE__ */ new Map();
+  var metaCache = /* @__PURE__ */ new Map();
   var iconIndex = /* @__PURE__ */ new Map();
   var summaryQueue = [];
   var summaryRunning = false;
@@ -2010,6 +2020,8 @@ ${GUEST_UI_LOOK_CSS}`;
   var sortEl = document.querySelector("#sort");
   var aiEl = document.querySelector("#ai");
   var refreshEl = document.querySelector("#refresh");
+  var groupEl = document.querySelector("#group");
+  var hiddenEl = document.querySelector("#hidden-toggle");
   var noticeEl = document.querySelector("#notice");
   var gridEl = document.querySelector("#grid");
   var footerEl = document.querySelector("#footer");
@@ -2028,14 +2040,21 @@ ${GUEST_UI_LOOK_CSS}`;
     return span(`chip ${cls}`.trim(), text);
   }
   function render() {
-    countEl.textContent = String(state.cards.length);
+    const visible = state.cards.filter((card) => !card.meta.hidden);
+    countEl.textContent = String(visible.length);
+    const hiddenCount = state.cards.length - visible.length;
+    hiddenEl.hidden = hiddenCount === 0 && !state.showHidden;
+    hiddenEl.textContent = state.showHidden ? `Hide hidden (${hiddenCount})` : `Hidden (${hiddenCount})`;
+    hiddenEl.setAttribute("aria-pressed", String(state.showHidden));
+    groupEl.textContent = `Group: ${state.groupOn ? "On" : "Off"}`;
+    groupEl.setAttribute("aria-pressed", String(state.groupOn));
     if (state.view === "project") {
       const card = state.cards.find((item) => item.project.id === state.viewId);
       gridEl.dataset.mode = "detail";
       gridEl.replaceChildren(card ? renderDetail(card) : mutedLine("That project is no longer open."));
     } else {
       gridEl.dataset.mode = "board";
-      gridEl.replaceChildren(...visibleCards().map(renderCard));
+      gridEl.replaceChildren(...renderBoard());
       if (state.cards.length === 0) {
         const empty = div("empty");
         const title = document.createElement("b");
@@ -2045,6 +2064,62 @@ ${GUEST_UI_LOOK_CSS}`;
       }
     }
     footerEl.textContent = footerText();
+  }
+  function renderBoard() {
+    const list = visibleCards();
+    if (!state.groupOn) {
+      const pinned2 = list.filter((card) => card.meta.pinned);
+      const rest2 = list.filter((card) => !card.meta.pinned);
+      return [...pinned2, ...rest2].map(renderCard);
+    }
+    const nodes = [];
+    const pinned = list.filter((card) => card.meta.pinned);
+    const rest = list.filter((card) => !card.meta.pinned);
+    if (pinned.length) nodes.push(renderSection("Pinned", pinned));
+    const groups = /* @__PURE__ */ new Map();
+    const ungrouped = [];
+    for (const card of rest) {
+      const group = card.meta.group?.trim();
+      if (group) {
+        const bucket = groups.get(group);
+        if (bucket) bucket.push(card);
+        else groups.set(group, [card]);
+      } else {
+        ungrouped.push(card);
+      }
+    }
+    for (const name of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {
+      const bucket = groups.get(name);
+      if (bucket) nodes.push(renderSection(name, bucket));
+    }
+    if (ungrouped.length) nodes.push(renderSection("Ungrouped", ungrouped));
+    if (!nodes.length && list.length) nodes.push(...list.map(renderCard));
+    return nodes;
+  }
+  function renderSection(title, cards) {
+    const section = document.createElement("section");
+    section.className = "section";
+    const key = `section:${title}`;
+    const collapsed = Boolean(state.collapsed[key]);
+    const head = document.createElement("button");
+    head.className = "section-head";
+    head.dataset.act = "collapse";
+    head.dataset.section = key;
+    head.setAttribute("aria-expanded", String(!collapsed));
+    head.title = collapsed ? `Expand ${title}` : `Collapse ${title}`;
+    const caret = span("", collapsed ? "\u25B8" : "\u25BE");
+    const label = document.createElement("b");
+    label.textContent = title;
+    head.append(caret, label, span("count", String(cards.length)));
+    section.append(head);
+    if (!collapsed) {
+      const body = div("section-body");
+      const pinned = cards.filter((card) => card.meta.pinned);
+      const rest = cards.filter((card) => !card.meta.pinned);
+      for (const card of [...pinned, ...rest]) body.append(renderCard(card));
+      section.append(body);
+    }
+    return section;
   }
   var rafId = 0;
   function scheduleRender() {
@@ -2059,8 +2134,9 @@ ${GUEST_UI_LOOK_CSS}`;
   function visibleCards() {
     const query = state.query.trim().toLowerCase();
     const list = state.cards.filter((card) => {
+      if (card.meta.hidden && !state.showHidden) return false;
       if (!query) return true;
-      const haystack = [card.project.name, card.project.directory, ...card.vitals?.stack ?? []].join(" ").toLowerCase();
+      const haystack = [card.project.name, card.project.directory, card.meta.group ?? "", ...card.vitals?.stack ?? []].join(" ").toLowerCase();
       return haystack.includes(query);
     });
     switch (state.sort) {
@@ -2080,8 +2156,12 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   function score(card) {
     const last = card.last;
-    if (!last) return 0;
     let value = 0;
+    for (const dep of card.vitals?.deployments ?? []) {
+      if (dep.live === false) value += 500;
+      if (dep.cert && (!dep.cert.authorized || dep.cert.daysLeft != null && dep.cert.daysLeft <= 7)) value += 400;
+    }
+    if (!last) return value;
     if (last.activity === "waiting-permission") value += 1e3;
     else if (last.activity === "waiting-question") value += 950;
     else if (last.activity === "running" || last.activity === "retrying") value += 900;
@@ -2092,7 +2172,7 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   function renderCard(card) {
     const el2 = document.createElement("article");
-    el2.className = "card";
+    el2.className = `card${card.meta.hidden ? " dim" : ""}`;
     el2.dataset.id = card.project.id;
     if (card.project.directory === state.directory) el2.dataset.current = "true";
     const top = div("card-top");
@@ -2109,7 +2189,15 @@ ${GUEST_UI_LOOK_CSS}`;
     name.title = `Open ${card.project.name}`;
     const path = span("path", card.vitals?.shortPath ?? card.project.directory);
     names.append(name, path);
-    top.append(avatar, names, span("ago", ago(card.last?.updatedAt)));
+    const pin = document.createElement("button");
+    pin.className = "pin";
+    pin.dataset.act = "pin";
+    pin.dataset.on = String(Boolean(card.meta.pinned));
+    pin.setAttribute("aria-pressed", String(Boolean(card.meta.pinned)));
+    pin.setAttribute("aria-label", card.meta.pinned ? `Unpin ${card.project.name}` : `Pin ${card.project.name}`);
+    pin.title = pin.getAttribute("aria-label") ?? "";
+    pin.textContent = card.meta.pinned ? "\u2605" : "\u2606";
+    top.append(avatar, names, pin, span("ago", ago(card.last?.updatedAt)));
     const summary = document.createElement("p");
     if (card.summary) {
       summary.className = "summary";
@@ -2126,8 +2214,11 @@ ${GUEST_UI_LOOK_CSS}`;
     el2.append(top, buildMeta(card));
     if (summary.className) el2.append(summary);
     if (stack.childElementCount) el2.append(stack);
-    if (card.editingSite) el2.append(renderSiteEditor(card));
-    el2.append(buildActions(card));
+    if (card.editingGroup) el2.append(renderGroupEditor(card));
+    else {
+      if (card.editingSite) el2.append(renderSiteEditor(card));
+      el2.append(buildActions(card));
+    }
     return el2;
   }
   function buildMeta(card) {
@@ -2135,6 +2226,24 @@ ${GUEST_UI_LOOK_CSS}`;
     if (card.vitals) {
       if (card.vitals.branch) meta.append(chip(card.vitals.branch));
       if (card.vitals.dirty) meta.append(chip(`\xB1${card.vitals.dirty}`, "warn"));
+      if (card.vitals.ahead) {
+        const up = chip(`\u2191${card.vitals.ahead}`, "warn");
+        up.title = `${card.vitals.ahead} unpushed commit${card.vitals.ahead === 1 ? "" : "s"}`;
+        meta.append(up);
+      }
+      if (card.vitals.behind) {
+        const down = chip(`\u2193${card.vitals.behind}`);
+        down.title = `${card.vitals.behind} commit${card.vitals.behind === 1 ? "" : "s"} behind the upstream`;
+        meta.append(down);
+      }
+      if (card.vitals.dirty && card.vitals.dirtySince) {
+        const ageDays = Math.floor((Date.now() - card.vitals.dirtySince) / 864e5);
+        if (ageDays >= 3) {
+          const stale = chip(`dirty ${ageDays}d`, "warn");
+          stale.title = `Uncommitted changes since ${new Date(card.vitals.dirtySince).toLocaleDateString()}`;
+          meta.append(stale);
+        }
+      }
       if (card.vitals.kind === "folder") meta.append(chip("folder"));
       meta.append(chip(sizeLabel(card)));
       if (card.vitals.size.state === "ready" && card.vitals.size.files) {
@@ -2146,6 +2255,12 @@ ${GUEST_UI_LOOK_CSS}`;
     if (card.chats) meta.append(chip(`${card.chats} chat${card.chats === 1 ? "" : "s"}`));
     if (card.worktrees) meta.append(chip(`${card.worktrees} tree${card.worktrees === 1 ? "" : "s"}`));
     if (card.last?.outcome === "failed") meta.append(chip("last turn failed", "fail"));
+    if (!card.editingGroup) {
+      const group = chip(card.meta.group?.trim() ? card.meta.group.trim() : "+ group", "edit");
+      group.dataset.act = "edit-group";
+      group.title = card.meta.group ? `Group: ${card.meta.group}. Click to change it.` : "Put this project in a group.";
+      meta.append(group);
+    }
     const deployments = card.vitals?.deployments ?? [];
     for (const dep of deployments.slice(0, 3)) meta.append(deploymentChip(dep));
     if (!card.editingSite) {
@@ -2166,6 +2281,7 @@ ${GUEST_UI_LOOK_CSS}`;
     if (card.vitals?.web) actions.append(actionButton("GitHub", "github"));
     actions.append(actionButton("Copy path", "copy"));
     if (card.summary) actions.append(actionButton("Rewrite", "rewrite"));
+    actions.append(actionButton(card.meta.hidden ? "Unhide" : "Hide", card.meta.hidden ? "unhide" : "hide"));
     return actions;
   }
   function renderDetail(card) {
@@ -2193,7 +2309,11 @@ ${GUEST_UI_LOOK_CSS}`;
       wrap.append(summary);
     }
     wrap.append(buildActions(card));
+    if (card.editingGroup) wrap.append(renderGroupEditor(card));
+    if (card.editingSite) wrap.append(renderSiteEditor(card));
     wrap.append(renderActivityPanel(card));
+    wrap.append(renderGitPanel(card));
+    wrap.append(renderDeploymentsPanel(card));
     wrap.append(renderKnowledgePanel(card));
     return wrap;
   }
@@ -2266,6 +2386,170 @@ ${GUEST_UI_LOOK_CSS}`;
     legend.append(span("", points[0]?.date ?? ""), span("", points[points.length - 1]?.date ?? ""));
     wrap.append(chart, legend);
     return wrap;
+  }
+  function renderGitPanel(card) {
+    const section = div("panel");
+    const head = div("panel-head");
+    const title = document.createElement("h3");
+    title.textContent = "Commits";
+    head.append(title);
+    section.append(head);
+    if (state.gitFor !== card.project.id || state.gitState === "loading" || state.gitState === "idle") {
+      section.append(mutedLine("Reading commit history\u2026"));
+      return section;
+    }
+    if (state.gitState === "error" || !state.git) {
+      section.append(mutedLine("Could not read commit history for this project."));
+      return section;
+    }
+    const data = state.git;
+    if (!data.available) {
+      section.append(mutedLine("Not a git repository, so there is no commit history."));
+      return section;
+    }
+    section.append(renderHeatmap(data.days));
+    const stats = div("stats");
+    const cells = [
+      [data.total.toLocaleString(), "commits in 26 weeks"],
+      [data.currentStreak.toLocaleString(), "current streak (days)"],
+      [data.bestStreak.toLocaleString(), "best streak (days)"]
+    ];
+    for (const [value, label] of cells) {
+      const cell = div("stat");
+      const strong = document.createElement("b");
+      strong.textContent = value;
+      cell.append(strong, span("", label));
+      stats.append(cell);
+    }
+    section.append(stats);
+    if (data.lastCommit) {
+      const recent = ago(data.lastCommit.at);
+      section.append(
+        mutedLine(
+          `Last commit ${data.lastCommit.hash} \u2014 ${data.lastCommit.subject || "(no message)"} \xB7 ${recent && recent !== "now" ? `${recent} ago` : "just now"}`
+        )
+      );
+    }
+    if (data.upstream) {
+      const sync = [];
+      if (data.ahead) sync.push(`\u2191${data.ahead} unpushed`);
+      if (data.behind) sync.push(`\u2193${data.behind} behind`);
+      if (sync.length) section.append(mutedLine(`${data.upstream}: ${sync.join(", ")}`));
+    }
+    return section;
+  }
+  function renderHeatmap(days) {
+    const wrap = div("heat-wrap");
+    const max = Math.max(0, ...days.map((day) => day.commits));
+    const levelOf = (commits) => {
+      if (!commits || max <= 0) return 0;
+      return 1 + Math.min(3, Math.floor(commits / max * 4));
+    };
+    const first = days.length ? /* @__PURE__ */ new Date(`${days[0].date}T12:00:00`) : /* @__PURE__ */ new Date();
+    const pad = (first.getDay() + 6) % 7;
+    const cells = [...Array(pad).fill(null), ...days];
+    const weeks = Math.max(1, Math.ceil(cells.length / 7));
+    const months = div("heat-months");
+    months.style.gridTemplateColumns = `repeat(${weeks}, 1fr)`;
+    let lastMonth = "";
+    for (let week = 0; week < weeks; week += 1) {
+      const cell = cells[week * 7];
+      const label = span("", "");
+      if (cell) {
+        const month = (/* @__PURE__ */ new Date(`${cell.date}T12:00:00`)).toLocaleString(void 0, { month: "short" });
+        if (month !== lastMonth) {
+          label.textContent = month;
+          lastMonth = month;
+        }
+      }
+      months.append(label);
+    }
+    const grid = div("heat");
+    grid.style.gridTemplateColumns = `repeat(${weeks}, 1fr)`;
+    for (let week = 0; week < weeks; week += 1) {
+      for (let row = 0; row < 7; row += 1) {
+        const cell = cells[week * 7 + row];
+        const node = div("heat-cell");
+        if (!cell) {
+          node.dataset.level = "empty";
+        } else {
+          node.dataset.level = String(levelOf(cell.commits));
+          node.title = `${cell.date}, ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`;
+        }
+        node.style.gridRow = String(row + 1);
+        node.style.gridColumn = String(week + 1);
+        grid.append(node);
+      }
+    }
+    wrap.append(months, grid);
+    return wrap;
+  }
+  function renderDeploymentsPanel(card) {
+    const section = div("panel");
+    const head = div("panel-head");
+    const title = document.createElement("h3");
+    title.textContent = "Deployments";
+    const check = actionButton("Check now", "check-now");
+    head.append(title, check);
+    section.append(head);
+    section.append(
+      mutedLine("Checks observed while Atlas is open \u2014 not continuous monitoring.")
+    );
+    const deployments = card.vitals?.deployments ?? [];
+    if (!deployments.length) {
+      section.append(mutedLine("No deployments detected. Add one with + site on the card."));
+      return section;
+    }
+    const history = state.probes.get(card.project.id) ?? {};
+    for (const dep of deployments) {
+      const row = div("dep-row");
+      const dot = document.createElement("i");
+      dot.className = "mini-dot";
+      dot.dataset.live = dep.live === true ? "up" : dep.live === false ? "down" : "unknown";
+      const link = document.createElement("button");
+      link.className = "dep-host";
+      link.dataset.act = "deploy";
+      link.dataset.url = dep.url;
+      link.textContent = hostOf(dep.url) ?? dep.label;
+      link.title = `${dep.label} \xB7 ${dep.source} \u2014 open it`;
+      row.append(dot, link);
+      const facts = [];
+      facts.push(dep.status ? `HTTP ${dep.status}` : dep.live === false ? "unreachable" : "not checked");
+      if (dep.ms != null) facts.push(`${dep.ms} ms`);
+      if (dep.cert?.validTo != null) {
+        const days = dep.cert.daysLeft;
+        facts.push(days != null && days < 0 ? `cert expired ${new Date(dep.cert.validTo).toLocaleDateString()}` : `cert expires ${new Date(dep.cert.validTo).toLocaleDateString()} (${days}d)`);
+      }
+      row.append(span("dep-facts", facts.join(" \xB7 ")));
+      const entries = history[dep.url] ?? [];
+      const downSince = downSinceMs(entries);
+      if (dep.live === false && downSince != null) {
+        const recent = ago(downSince);
+        const down = span("dep-down", `down since ${recent && recent !== "now" ? `${recent} ago` : "just now"}`);
+        row.append(down);
+      }
+      if (entries.length) {
+        const dots = div("probe-dots");
+        for (const entry of entries.slice(-20)) {
+          const mark = document.createElement("i");
+          mark.className = "probe-dot";
+          mark.dataset.live = entry.live === true ? "up" : entry.live === false ? "down" : "unknown";
+          mark.title = `${new Date(entry.at).toLocaleString()} \xB7 ${entry.live === true ? "up" : entry.live === false ? "down" : "unknown"}${entry.ms != null ? ` \xB7 ${entry.ms} ms` : ""}`;
+          dots.append(mark);
+        }
+        row.append(dots);
+      }
+      section.append(row);
+    }
+    return section;
+  }
+  function downSinceMs(entries) {
+    let first = null;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      if (entries[index].live !== false) break;
+      first = entries[index].at;
+    }
+    return first;
   }
   function renderKnowledgePanel(card) {
     const section = div("panel");
@@ -2347,6 +2631,50 @@ ${GUEST_UI_LOOK_CSS}`;
     }
     render();
   }
+  async function loadGit(card) {
+    state.gitFor = card.project.id;
+    state.gitState = "loading";
+    state.git = null;
+    render();
+    try {
+      const response = await host.serviceRequest({
+        method: "GET",
+        path: "/git",
+        query: { directory: card.project.directory }
+      });
+      if (response.status !== 200) throw new Error(`service answered ${response.status}`);
+      if (state.gitFor !== card.project.id) return;
+      state.git = JSON.parse(response.body);
+      state.gitState = "ready";
+    } catch {
+      if (state.gitFor !== card.project.id) return;
+      state.gitState = "error";
+    }
+    render();
+  }
+  async function recordProbes(card) {
+    const deployments = card.vitals?.deployments ?? [];
+    if (!deployments.length) return;
+    let history = state.probes.get(card.project.id);
+    if (!history) {
+      history = {};
+      state.probes.set(card.project.id, history);
+    }
+    let dirty = false;
+    const now = Date.now();
+    for (const dep of deployments) {
+      const entries = history[dep.url] ?? [];
+      const last = entries[entries.length - 1];
+      if (last && now - last.at < 5 * 6e4) continue;
+      entries.push({ at: now, live: dep.live, ms: dep.ms ?? null });
+      history[dep.url] = entries.slice(-40);
+      dirty = true;
+    }
+    if (dirty) {
+      await host.storage.set(`${PROBE_PREFIX}${card.project.id}`, history).catch(() => {
+      });
+    }
+  }
   function renderSiteEditor(card) {
     const row = div("editor");
     const input = document.createElement("input");
@@ -2370,6 +2698,45 @@ ${GUEST_UI_LOOK_CSS}`;
     row.append(input, save, cancel);
     requestAnimationFrame(() => input.focus());
     return row;
+  }
+  function renderGroupEditor(card) {
+    const row = div("editor");
+    const input = document.createElement("input");
+    input.placeholder = "Group name (empty clears)\u2026";
+    input.value = card.groupDraft;
+    input.dataset.groupInput = card.project.id;
+    input.setAttribute("aria-label", `Group for ${card.project.name}`);
+    input.setAttribute("list", "atlas-groups");
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void saveGroup(card);
+      }
+      if (event.key === "Escape") {
+        card.editingGroup = false;
+        render();
+      }
+    });
+    const data = document.createElement("datalist");
+    data.id = "atlas-groups";
+    for (const group of existingGroups()) {
+      const option = document.createElement("option");
+      option.value = group;
+      data.append(option);
+    }
+    const save = actionButton("Save", "save-group", "primary");
+    const cancel = actionButton("Cancel", "cancel-group");
+    row.append(input, data, save, cancel);
+    requestAnimationFrame(() => input.focus());
+    return row;
+  }
+  function existingGroups() {
+    const names = /* @__PURE__ */ new Set();
+    for (const card of state.cards) {
+      const group = card.meta.group?.trim();
+      if (group) names.add(group);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
   }
   function actionButton(label, act, cls = "") {
     const button2 = document.createElement("button");
@@ -2415,13 +2782,38 @@ ${GUEST_UI_LOOK_CSS}`;
     dot.className = "mini-dot";
     dot.dataset.live = dep.live === true ? "up" : dep.live === false ? "down" : "unknown";
     button2.append(dot, document.createTextNode(hostOf(dep.url) ?? dep.label));
+    button2.append(certBadge(dep.cert));
     const detail = dep.status ? `HTTP ${dep.status}` : dep.live === false ? "unreachable" : "not checked yet";
-    button2.title = `${dep.label} \xB7 ${dep.source} \xB7 ${detail}`;
+    button2.title = `${dep.label} \xB7 ${dep.source} \xB7 ${detail}${dep.ms != null ? ` \xB7 ${dep.ms} ms` : ""}${certTitle(dep.cert)}`;
     return button2;
   }
+  function certBadge(cert) {
+    const badge = document.createElement("span");
+    if (!cert || cert.daysLeft == null) return badge;
+    if (cert.daysLeft < 0) {
+      badge.className = "cert fail";
+      badge.textContent = "cert expired";
+    } else if (!cert.authorized || cert.daysLeft <= 7) {
+      badge.className = "cert fail";
+      badge.textContent = `cert ${cert.daysLeft}d`;
+    } else if (cert.daysLeft <= 21) {
+      badge.className = "cert warn";
+      badge.textContent = `cert ${cert.daysLeft}d`;
+    }
+    return badge;
+  }
+  function certTitle(cert) {
+    if (!cert || cert.validTo == null) return "";
+    const expiry = new Date(cert.validTo).toLocaleDateString();
+    const issuer = cert.issuer ? `, issued to ${cert.issuer}` : "";
+    const state2 = cert.daysLeft != null && cert.daysLeft < 0 ? "expired" : cert.authorized ? "valid" : `invalid (${cert.error ?? "not trusted"})`;
+    return ` \xB7 cert ${state2}, expires ${expiry}${issuer}`;
+  }
   function footerText() {
-    const total = state.cards.length;
-    const parts = [`${total} project${total === 1 ? "" : "s"}`];
+    const hidden = state.cards.filter((card) => card.meta.hidden);
+    const visibleCount = state.cards.length - hidden.length;
+    const parts = [`${visibleCount} project${visibleCount === 1 ? "" : "s"}`];
+    if (hidden.length && !state.showHidden) parts.push(`${hidden.length} hidden`);
     if (state.serviceDown) parts.push("local service offline");
     const measuring = state.cards.filter((card) => card.vitals?.size.state === "running").length;
     if (measuring) parts.push(`measuring ${measuring}`);
@@ -2430,7 +2822,12 @@ ${GUEST_UI_LOOK_CSS}`;
   async function boot() {
     try {
       const settings = await host.storage.get(SETTINGS_KEY).catch(() => null);
-      if (settings && typeof settings.ai === "boolean") state.ai = settings.ai;
+      if (settings) {
+        if (typeof settings.ai === "boolean") state.ai = settings.ai;
+        if (typeof settings.groupOn === "boolean") state.groupOn = settings.groupOn;
+        if (typeof settings.showHidden === "boolean") state.showHidden = settings.showHidden;
+        if (settings.collapsed && typeof settings.collapsed === "object") state.collapsed = settings.collapsed;
+      }
       aiEl.checked = state.ai;
       const keys = await host.storage.keys().catch(() => []);
       await Promise.all(
@@ -2443,6 +2840,21 @@ ${GUEST_UI_LOOK_CSS}`;
           } else if (key.startsWith(SITE_PREFIX)) {
             const value = await host.storage.get(key).catch(() => null);
             if (value && typeof value.site === "string") siteCache.set(key.slice(SITE_PREFIX.length), value.site);
+          } else if (key.startsWith(META_PREFIX)) {
+            const value = await host.storage.get(key).catch(() => null);
+            if (value && typeof value === "object") {
+              metaCache.set(key.slice(META_PREFIX.length), {
+                pinned: value.pinned === true,
+                group: typeof value.group === "string" && value.group.trim() ? value.group.trim() : null,
+                hidden: value.hidden === true
+              });
+            }
+          } else if (key.startsWith(PROBE_PREFIX)) {
+            const value = await host.storage.get(key).catch(() => null);
+            if (value && typeof value === "object") {
+              const id = key.slice(PROBE_PREFIX.length);
+              state.probes.set(id, value);
+            }
           }
         })
       );
@@ -2450,6 +2862,7 @@ ${GUEST_UI_LOOK_CSS}`;
       const snapshot = await host.listProjects();
       state.cards = (snapshot.projects ?? []).map((project) => {
         const known = iconIndex.get(project.id) ?? iconIndex.get(normDir(project.directory));
+        const meta = metaCache.get(project.id);
         return {
           project,
           sessions: [],
@@ -2463,6 +2876,9 @@ ${GUEST_UI_LOOK_CSS}`;
           manualSite: siteCache.get(project.id) ?? null,
           editingSite: false,
           siteDraft: "",
+          meta: meta ? { ...meta } : {},
+          editingGroup: false,
+          groupDraft: "",
           icon: known?.icon ?? null,
           iconColor: known?.color ?? null
         };
@@ -2533,6 +2949,7 @@ ${GUEST_UI_LOOK_CSS}`;
       ensureSizePolling();
       maybeSummarize(card);
       scheduleRender();
+      void recordProbes(card);
     } catch (error) {
       const code = errorCode(error);
       if (code === "NO_SERVICE" || code === "SERVICE_FAILED") {
@@ -2677,6 +3094,14 @@ ${GUEST_UI_LOOK_CSS}`;
   gridEl.addEventListener("click", (event) => {
     const target = event.target.closest("[data-act]");
     if (!target) return;
+    if (target.dataset.act === "collapse") {
+      const key = target.dataset.section ?? "";
+      state.collapsed[key] = !state.collapsed[key];
+      if (!state.collapsed[key]) delete state.collapsed[key];
+      void saveSettings();
+      render();
+      return;
+    }
     const id = target.closest(".card")?.dataset.id ?? (state.view === "project" ? state.viewId ?? void 0 : void 0);
     const card = findCard(id);
     if (!card) return;
@@ -2689,10 +3114,41 @@ ${GUEST_UI_LOOK_CSS}`;
   });
   gridEl.addEventListener("input", (event) => {
     const input = event.target;
-    if (!input.matches("[data-site-input]")) return;
-    const card = findCard(input.dataset.siteInput);
-    if (card) card.siteDraft = input.value;
+    if (input.matches("[data-site-input]")) {
+      const card = findCard(input.dataset.siteInput);
+      if (card) card.siteDraft = input.value;
+      return;
+    }
+    if (input.matches("[data-group-input]")) {
+      const card = findCard(input.dataset.groupInput);
+      if (card) card.groupDraft = input.value;
+    }
   });
+  async function saveSettings() {
+    const settings = { ai: state.ai, groupOn: state.groupOn, collapsed: state.collapsed, showHidden: state.showHidden };
+    await host.storage.set(SETTINGS_KEY, settings).catch(() => {
+    });
+  }
+  async function persistMeta(card) {
+    const group = card.meta.group?.trim() ? card.meta.group.trim() : null;
+    card.meta.group = group;
+    const empty = !card.meta.pinned && !group && !card.meta.hidden;
+    metaCache.set(card.project.id, { ...card.meta });
+    if (empty) {
+      metaCache.delete(card.project.id);
+      await host.storage.delete(`${META_PREFIX}${card.project.id}`).catch(() => {
+      });
+    } else {
+      await host.storage.set(`${META_PREFIX}${card.project.id}`, { pinned: card.meta.pinned ?? false, group, hidden: card.meta.hidden ?? false }).catch(() => {
+      });
+    }
+  }
+  async function saveGroup(card) {
+    card.meta.group = card.groupDraft.trim() || null;
+    card.editingGroup = false;
+    await persistMeta(card);
+    render();
+  }
   async function runAction(card, act) {
     switch (act) {
       case "detail":
@@ -2702,8 +3158,12 @@ ${GUEST_UI_LOOK_CSS}`;
         state.activity = null;
         state.activityState = "idle";
         state.activityFor = null;
+        state.git = null;
+        state.gitState = "idle";
+        state.gitFor = null;
         render();
         void loadActivity(card, 30);
+        void loadGit(card);
         return;
       case "back":
         state.view = "board";
@@ -2741,6 +3201,7 @@ ${GUEST_UI_LOOK_CSS}`;
         return;
       case "edit-site":
         card.editingSite = true;
+        card.editingGroup = false;
         card.siteDraft = card.manualSite ?? "";
         render();
         return;
@@ -2750,6 +3211,38 @@ ${GUEST_UI_LOOK_CSS}`;
         return;
       case "save-site":
         return saveSite(card);
+      case "pin":
+        card.meta.pinned = !card.meta.pinned;
+        await persistMeta(card);
+        render();
+        return;
+      case "hide":
+        card.meta.hidden = true;
+        await persistMeta(card);
+        render();
+        return;
+      case "unhide":
+        card.meta.hidden = false;
+        await persistMeta(card);
+        render();
+        return;
+      case "edit-group":
+        card.editingGroup = true;
+        card.editingSite = false;
+        card.groupDraft = card.meta.group ?? "";
+        render();
+        return;
+      case "cancel-group":
+        card.editingGroup = false;
+        render();
+        return;
+      case "save-group":
+        return saveGroup(card);
+      case "check-now":
+        toast("info", "Re-checking deployments\u2026");
+        await loadVitals(card, true);
+        render();
+        return;
       case "rewrite": {
         card.summary = null;
         card.summaryState = "idle";
@@ -2945,14 +3438,23 @@ ${GUEST_UI_LOOK_CSS}`;
   });
   aiEl.addEventListener("change", () => {
     state.ai = aiEl.checked;
-    void host.storage.set(SETTINGS_KEY, { ai: state.ai }).catch(() => {
-    });
+    void saveSettings();
     if (state.ai) {
       for (const card of state.cards) maybeSummarize(card);
     } else {
       summaryQueue.length = 0;
     }
     scheduleRender();
+  });
+  groupEl.addEventListener("click", () => {
+    state.groupOn = !state.groupOn;
+    void saveSettings();
+    render();
+  });
+  hiddenEl.addEventListener("click", () => {
+    state.showHidden = !state.showHidden;
+    void saveSettings();
+    render();
   });
   refreshEl.addEventListener("click", () => {
     refreshEl.disabled = true;

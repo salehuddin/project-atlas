@@ -48,6 +48,24 @@ const ICONS = {
 
 /* ---------------------------------------------------------- projects */
 
+type DemoCert = {
+  validTo: number | null;
+  daysLeft: number | null;
+  issuer: string | null;
+  authorized: boolean;
+  error?: string;
+} | null;
+
+type DemoDeployment = {
+  label: string;
+  url: string;
+  source: string;
+  live: boolean | null;
+  status: number | null;
+  ms: number | null;
+  cert: DemoCert;
+};
+
 type DemoProject = {
   id: string;
   name: string;
@@ -55,14 +73,20 @@ type DemoProject = {
   shortPath: string;
   icon: string | null;
   color: string | null;
+  group: string | null;
+  pinned: boolean;
   summary: string;
   branch: string;
   dirty: number;
+  dirtyDays: number | null;
+  ahead: number;
+  behind: number;
+  detached: boolean;
   web: string | null;
   stack: string[];
   bytes: number;
   files: number;
-  deployments: Array<{ label: string; url: string; source: string; live: boolean | null; status: number | null }>;
+  deployments: DemoDeployment[];
   chats: number;
   worktrees: number;
   session: {
@@ -84,17 +108,39 @@ export const PROJECTS: DemoProject[] = [
     shortPath: "~\\projects\\lumen-bakery",
     icon: ICONS.lumen,
     color: "#ff8a3a",
+    group: null,
+    pinned: true,
     summary:
       "Storefront and pickup scheduling for a neighbourhood bakery. Next.js with Stripe checkout, deployed to Vercel from main.",
     branch: "main",
     dirty: 3,
+    dirtyDays: 5,
+    ahead: 2,
+    behind: 0,
+    detached: false,
     web: "https://github.com/demo/lumen-bakery",
     stack: ["Next.js", "TypeScript", "Stripe", "Vercel", "pnpm"],
     bytes: 412 * 1024 * 1024,
     files: 18_240,
     deployments: [
-      { label: "Production", url: "https://lumenbakery.example", source: "vercel.json", live: true, status: 200 },
-      { label: "Preview", url: "https://lumen-bakery-git-next.example", source: ".env", live: true, status: 200 },
+      {
+        label: "Production",
+        url: "https://lumenbakery.example",
+        source: "vercel.json",
+        live: true,
+        status: 200,
+        ms: 180,
+        cert: { validTo: Date.now() + 9 * DAY, daysLeft: 9, issuer: "Example CA", authorized: true },
+      },
+      {
+        label: "Preview",
+        url: "https://lumen-bakery-git-next.example",
+        source: ".env",
+        live: true,
+        status: 200,
+        ms: 240,
+        cert: { validTo: Date.now() + 120 * DAY, daysLeft: 120, issuer: "Example CA", authorized: true },
+      },
     ],
     chats: 14,
     worktrees: 2,
@@ -107,17 +153,39 @@ export const PROJECTS: DemoProject[] = [
     shortPath: "~\\projects\\orbit-crm",
     icon: ICONS.orbit,
     color: "#5b5bd6",
+    group: "Clients",
+    pinned: false,
     summary:
       "Lightweight CRM for small agencies with pipelines, reminders and an email inbox. Laravel API behind a Vue single-page app, shipped with Docker on Fly.io.",
     branch: "feat/reminders",
     dirty: 11,
+    dirtyDays: 4,
+    ahead: 0,
+    behind: 1,
+    detached: false,
     web: "https://github.com/demo/orbit-crm",
     stack: ["Laravel", "PHP", "Vue", "Docker", "Fly.io"],
     bytes: 1.6 * 1024 * 1024 * 1024,
     files: 41_870,
     deployments: [
-      { label: "App", url: "https://app.orbitcrm.example", source: "fly.toml", live: true, status: 200 },
-      { label: "Docs", url: "https://docs.orbitcrm.example", source: "CNAME", live: true, status: 200 },
+      {
+        label: "App",
+        url: "https://app.orbitcrm.example",
+        source: "fly.toml",
+        live: true,
+        status: 200,
+        ms: 310,
+        cert: { validTo: Date.now() + 45 * DAY, daysLeft: 45, issuer: "Example CA", authorized: true },
+      },
+      {
+        label: "Docs",
+        url: "https://docs.orbitcrm.example",
+        source: "CNAME",
+        live: true,
+        status: 200,
+        ms: 150,
+        cert: { validTo: Date.now() + 200 * DAY, daysLeft: 200, issuer: "Example CA", authorized: true },
+      },
     ],
     chats: 31,
     worktrees: 1,
@@ -130,16 +198,30 @@ export const PROJECTS: DemoProject[] = [
     shortPath: "~\\projects\\tidepool-api",
     icon: ICONS.tidepool,
     color: "#2f7fe0",
+    group: "Clients",
+    pinned: false,
     summary:
       "Tide and weather data service for harbour apps. A Go REST API backed by PostgreSQL, running on Render with nightly data imports.",
     branch: "main",
     dirty: 0,
+    dirtyDays: null,
+    ahead: 0,
+    behind: 0,
+    detached: false,
     web: "https://github.com/demo/tidepool-api",
     stack: ["Go", "PostgreSQL", "Docker", "Render"],
     bytes: 96 * 1024 * 1024,
     files: 2_104,
     deployments: [
-      { label: "API", url: "https://api.tidepool.example", source: "render.yaml", live: true, status: 200 },
+      {
+        label: "API",
+        url: "https://api.tidepool.example",
+        source: "render.yaml",
+        live: true,
+        status: 200,
+        ms: 95,
+        cert: { validTo: Date.now() + 200 * DAY, daysLeft: 200, issuer: "Example CA", authorized: true },
+      },
     ],
     chats: 9,
     worktrees: 0,
@@ -152,10 +234,16 @@ export const PROJECTS: DemoProject[] = [
     shortPath: "~\\projects\\fieldnotes",
     icon: ICONS.fieldnotes,
     color: "#1c9a6e",
+    group: "Personal",
+    pinned: false,
     summary:
       "Offline-first field notebook for surveyors, syncing photos and GPS tags when a connection returns. React Native with an Expo build pipeline.",
     branch: "release/1.4",
     dirty: 0,
+    dirtyDays: null,
+    ahead: 0,
+    behind: 0,
+    detached: false,
     web: "https://github.com/demo/fieldnotes",
     stack: ["React Native", "Expo", "TypeScript", "SQLite"],
     bytes: 733 * 1024 * 1024,
@@ -172,17 +260,39 @@ export const PROJECTS: DemoProject[] = [
     shortPath: "~\\projects\\paperkite-docs",
     icon: ICONS.paperkite,
     color: "#2b8bd6",
+    group: "Personal",
+    pinned: false,
     summary:
       "Documentation site for the Paperkite design system, with live component previews. Astro and MDX, published to Cloudflare Pages.",
     branch: "main",
     dirty: 1,
+    dirtyDays: 1,
+    ahead: 0,
+    behind: 0,
+    detached: false,
     web: "https://github.com/demo/paperkite-docs",
     stack: ["Astro", "MDX", "Cloudflare", "npm"],
     bytes: 188 * 1024 * 1024,
     files: 9_332,
     deployments: [
-      { label: "Docs", url: "https://paperkite.example", source: "wrangler.toml", live: true, status: 200 },
-      { label: "Staging", url: "https://staging.paperkite.example", source: ".env", live: false, status: null },
+      {
+        label: "Docs",
+        url: "https://paperkite.example",
+        source: "wrangler.toml",
+        live: true,
+        status: 200,
+        ms: 150,
+        cert: { validTo: Date.now() + 60 * DAY, daysLeft: 60, issuer: "Example CA", authorized: true },
+      },
+      {
+        label: "Staging",
+        url: "https://staging.paperkite.example",
+        source: ".env",
+        live: false,
+        status: null,
+        ms: null,
+        cert: null,
+      },
     ],
     chats: 6,
     worktrees: 0,
@@ -195,10 +305,16 @@ export const PROJECTS: DemoProject[] = [
     shortPath: "~\\projects\\northwind-studio",
     icon: null,
     color: "#8e4ec6",
+    group: "Clients",
+    pinned: false,
     summary:
       "Marketing site for a design studio, built as a custom WordPress theme with a small block library. Deployed by SFTP to shared hosting.",
     branch: "main",
     dirty: 0,
+    dirtyDays: null,
+    ahead: 0,
+    behind: 0,
+    detached: false,
     web: null,
     stack: ["WordPress", "PHP", "Tailwind"],
     bytes: 64 * 1024 * 1024,
@@ -217,6 +333,46 @@ export const DEMO_SUMMARY_KEYS: Array<[string, unknown]> = PROJECTS.map((project
   `atlas:v1:summary:${project.id}`,
   { text: project.summary, hash: "demo", at: Date.now() },
 ]);
+
+/** Pre-seeded pins and groups, so the board demo shows sections on first load. */
+export const DEMO_META_KEYS: Array<[string, unknown]> = PROJECTS.filter(
+  (project) => project.pinned || project.group,
+).map((project) => [
+  `atlas:v1:meta:${project.id}`,
+  { pinned: project.pinned, group: project.group, hidden: false },
+]);
+
+/** Pre-seeded probe histories, so the Deployments panel demo has dots on first load. */
+export const DEMO_PROBE_KEYS: Array<[string, unknown]> = [
+  [
+    `atlas:v1:probes:demo_lumen`,
+    {
+      "https://lumenbakery.example": probeSeries(15, true, 180),
+      "https://lumen-bakery-git-next.example": probeSeries(8, true, 240),
+    },
+  ],
+  [
+    `atlas:v1:probes:demo_orbit`,
+    { "https://app.orbitcrm.example": probeSeries(12, true, 310, 5) },
+  ],
+  [
+    `atlas:v1:probes:demo_paperkite`,
+    {
+      "https://paperkite.example": probeSeries(10, true, 150),
+      "https://staging.paperkite.example": probeSeries(9, false, 0),
+    },
+  ],
+];
+
+/** Invented check history: `failAt` flips one middle entry to down for variety. */
+function probeSeries(count: number, live: boolean, ms: number, failAt = -1) {
+  const entries = [];
+  for (let index = count; index >= 1; index -= 1) {
+    const down = live ? index === failAt : index <= 3;
+    entries.push({ at: Date.now() - index * 11 * 60_000, live: !down, ms: down ? null : ms });
+  }
+  return entries;
+}
 
 /* --------------------------------------------------------- host data */
 
@@ -303,6 +459,10 @@ export function handleService(path: string, query: Record<string, string>) {
         site: project.deployments[0]?.url ?? null,
         stack: project.stack,
         kind: "repo",
+        ahead: project.ahead,
+        behind: project.behind,
+        dirtySince: project.dirtyDays == null ? null : Date.now() - project.dirtyDays * DAY,
+        detached: project.detached,
         deployments: project.deployments.map((dep) => ({ kind: "deploy", ...dep })),
         iconUrl: null,
         size: { bytes: project.bytes, files: project.files, at: Date.now(), state: "ready", truncated: false },
@@ -322,6 +482,12 @@ export function handleService(path: string, query: Record<string, string>) {
 
     case "/readme":
       return json({ text: "", hash: "demo" });
+
+    case "/git": {
+      const project = byDirectory(query.directory);
+      if (!project) return { status: 404, headers: {}, body: "{}" };
+      return json(gitHistory(project.id));
+    }
 
     case "/activity":
       return json(activity(query.projectId, Number(query.days) || 30));
@@ -400,5 +566,73 @@ function activity(projectId: string, days: number) {
         { id: "p4", file: "holiday-menu-landing-page.md", title: "Holiday menu landing page", total: 6, done: 6, open: 0 },
       ],
     },
+  };
+}
+
+/* -------------------------------------------------------- git history */
+
+const GIT_SUBJECTS = [
+  "fix: checkout total rounding for pickup orders",
+  "feat: reminder scheduling queue",
+  "docs: rewrite the deployment runbook",
+  "refactor: split the order board by station",
+  "fix: retry photo uploads on flaky networks",
+  "chore: bump dependencies for the holiday freeze",
+  "feat: allergen labels on every product card",
+  "fix: tooltip overflow on narrow viewports",
+];
+
+/** Seeded 182-day commit series with a realistic weekday rhythm. */
+function gitHistory(projectId: string) {
+  const project = PROJECTS.find((item) => item.id === projectId) ?? PROJECTS[0];
+  const rng = mulberry32(987654 + projectId.length * 101);
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+
+  const days = [];
+  for (let offset = 181; offset >= 0; offset -= 1) {
+    const date = new Date(today.getTime() - offset * DAY);
+    const weekend = date.getDay() === 0 || date.getDay() === 6;
+    let commits = Math.round(rng() * 6 * (weekend ? 0.25 : 1));
+    if (rng() < (weekend ? 0.5 : 0.12)) commits = 0;
+    if (offset === 0) commits = Math.max(commits, 2);
+    days.push({ date: isoDay(date), commits });
+  }
+
+  let bestStreak = 0;
+  let streak = 0;
+  for (const day of days) {
+    streak = day.commits > 0 ? streak + 1 : 0;
+    if (streak > bestStreak) bestStreak = streak;
+  }
+  let currentStreak = 0;
+  const from = days.length && days[days.length - 1].commits === 0 ? days.length - 2 : days.length - 1;
+  for (let index = from; index >= 0 && days[index].commits > 0; index -= 1) currentStreak += 1;
+
+  let lastCommit = null;
+  for (let index = days.length - 1; index >= 0; index -= 1) {
+    if (days[index].commits > 0) {
+      const at = new Date(`${days[index].date}T15:24:00`).getTime();
+      lastCommit = {
+        hash: Math.floor(rng() * 0xffffff).toString(16).padStart(6, "0").slice(0, 7),
+        subject: GIT_SUBJECTS[Math.floor(rng() * GIT_SUBJECTS.length)],
+        at,
+      };
+      break;
+    }
+  }
+
+  return {
+    available: true,
+    days,
+    total: days.reduce((sum, day) => sum + day.commits, 0),
+    bestStreak,
+    currentStreak,
+    lastCommit,
+    ahead: project.ahead,
+    behind: project.behind,
+    upstream: project.ahead || project.behind ? "origin/main" : null,
+    dirtySince: project.dirtyDays == null ? null : Date.now() - project.dirtyDays * DAY,
+    detached: project.detached,
   };
 }

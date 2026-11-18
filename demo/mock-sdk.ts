@@ -6,7 +6,7 @@
  * plain browser with invented projects. Nothing in `src/` is changed or
  * copied: the demo build swaps this module in for the SDK at bundle time.
  */
-import { DEMO_DIRECTORY, DEMO_SUMMARY_KEYS, handleService, listProjects, listSessions, listWorktrees } from "./fixtures";
+import { DEMO_DIRECTORY, DEMO_SUMMARY_KEYS, DEMO_META_KEYS, DEMO_PROBE_KEYS, handleService, listProjects, listSessions, listWorktrees } from "./fixtures";
 
 export class HostRequestError extends Error {
   code: string;
@@ -19,7 +19,7 @@ export class HostRequestError extends Error {
 const params = new URLSearchParams(location.search);
 
 export function connectHost() {
-  const storage = new Map<string, unknown>(DEMO_SUMMARY_KEYS);
+  const storage = new Map<string, unknown>([...DEMO_SUMMARY_KEYS, ...DEMO_META_KEYS, ...DEMO_PROBE_KEYS]);
   const ok = async () => undefined;
 
   return {

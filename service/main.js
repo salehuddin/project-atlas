@@ -24,6 +24,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 // src/service/main.ts
 var import_node_http = __toESM(require("node:http"));
 var import_node_path = __toESM(require("node:path"));
+var import_node_tls = __toESM(require("node:tls"));
 var import_node_child_process = require("node:child_process");
 var import_node_fs = require("node:fs");
 var import_node_crypto = require("node:crypto");
@@ -45,6 +46,7 @@ var sizes = /* @__PURE__ */ new Map();
 var iconCache = /* @__PURE__ */ new Map();
 var localIconCache = /* @__PURE__ */ new Map();
 var probeCache = /* @__PURE__ */ new Map();
+var gitCache = /* @__PURE__ */ new Map();
 var activityCache = /* @__PURE__ */ new Map();
 var knowledgeCache = /* @__PURE__ */ new Map();
 var projectsCache = null;
@@ -335,11 +337,64 @@ async function projectsPayload() {
   projectsCache = { at: now, data };
   return data;
 }
-async function probeUrl(url) {
+async function checkTls(host) {
+  return new Promise((resolve) => {
+    let done = false;
+    let socket = null;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        socket?.destroy();
+      } catch {
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      finish({ validTo: null, daysLeft: null, issuer: null, authorized: false, error: "timeout" });
+    }, 4e3);
+    try {
+      socket = import_node_tls.default.connect(
+        { host, port: 443, servername: host, rejectUnauthorized: false, timeout: 4e3 },
+        () => {
+          try {
+            const peer = socket?.getPeerCertificate();
+            const current = socket;
+            const authorized = current?.authorized ?? false;
+            const authError = current?.authorizationError ?? null;
+            if (!peer || !peer.valid_to) {
+              finish(null);
+              return;
+            }
+            const validTo = Date.parse(peer.valid_to);
+            const info = {
+              validTo: Number.isNaN(validTo) ? null : validTo,
+              daysLeft: Number.isNaN(validTo) ? null : Math.floor((validTo - Date.now()) / 864e5),
+              issuer: peer.issuer?.CN ?? peer.issuer?.O ?? null,
+              authorized
+            };
+            if (authError) info.error = String(authError);
+            finish(info);
+          } catch {
+            finish(null);
+          }
+        }
+      );
+      socket.on("error", () => {
+        finish({ validTo: null, daysLeft: null, issuer: null, authorized: false, error: "unreachable" });
+      });
+    } catch {
+      finish(null);
+    }
+  });
+}
+async function probeUrl(url, force = false) {
   const cached = probeCache.get(url);
-  if (cached && Date.now() - cached.at < PROBE_TTL_MS) {
-    return { live: cached.live, status: cached.status };
+  if (!force && cached && Date.now() - cached.at < PROBE_TTL_MS) {
+    return { live: cached.live, status: cached.status, ms: cached.ms, cert: cached.cert };
   }
+  const started = Date.now();
   let live = null;
   let status = null;
   try {
@@ -348,7 +403,7 @@ async function probeUrl(url) {
       redirect: "follow",
       signal: AbortSignal.timeout(4500),
       headers: {
-        "user-agent": "ProjectAtlas/0.2 (OpenChamber extension)",
+        "user-agent": "ProjectAtlas/0.5 (OpenChamber extension)",
         accept: "text/html,application/xhtml+xml,*/*;q=0.5"
       }
     });
@@ -362,8 +417,18 @@ async function probeUrl(url) {
     live = false;
     status = null;
   }
-  probeCache.set(url, { at: Date.now(), live, status });
-  return { live, status };
+  const ms = Date.now() - started;
+  let cert = null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" && parsed.hostname) {
+      cert = await checkTls(parsed.hostname);
+    }
+  } catch {
+    cert = null;
+  }
+  probeCache.set(url, { at: Date.now(), live, status, ms, cert });
+  return { live, status, ms, cert };
 }
 function labelForKey(key) {
   const upper = key.toUpperCase();
@@ -486,11 +551,41 @@ async function detectDeployments(dir, pkg, composer, remote) {
   }
   return list;
 }
-async function buildDeployments(dir, pkg, composer, remote) {
+async function buildDeployments(dir, pkg, composer, remote, force) {
   const candidates = (await detectDeployments(dir, pkg, composer, remote)).slice(0, 4);
   return Promise.all(
-    candidates.map(async (candidate) => ({ ...candidate, ...await probeUrl(candidate.url) }))
+    candidates.map(async (candidate) => ({ ...candidate, ...await probeUrl(candidate.url, force) }))
   );
+}
+async function gitAheadBehind(dir) {
+  const upstream = (await run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]))?.trim();
+  if (!upstream) return { ahead: null, behind: null, upstream: null };
+  const counts = (await run("git", ["-C", dir, "rev-list", "--left-right", "--count", "@{u}...HEAD"]))?.trim();
+  const match = counts?.match(/^(\d+)\s+(\d+)$/);
+  if (!match) return { ahead: null, behind: null, upstream };
+  return { ahead: Number(match[2]), behind: Number(match[1]), upstream };
+}
+async function dirtySinceMs(dir, statusOut) {
+  if (!statusOut) return null;
+  const files = [];
+  for (const line of statusOut.split("\n")) {
+    if (line.length < 4) continue;
+    let file = line.slice(3).trim();
+    if (!file) continue;
+    const arrow = file.indexOf(" -> ");
+    if (arrow >= 0) file = file.slice(arrow + 4);
+    if (file.startsWith('"') && file.endsWith('"')) file = file.slice(1, -1);
+    if (file) files.push(file);
+    if (files.length >= 100) break;
+  }
+  if (!files.length) return null;
+  let oldest = null;
+  for (const file of files) {
+    const stat = await import_node_fs.promises.stat(import_node_path.default.join(dir, file)).catch(() => null);
+    const mtime = stat?.mtimeMs ?? null;
+    if (mtime != null && (oldest == null || mtime < oldest)) oldest = mtime;
+  }
+  return oldest;
 }
 function webFromRemote(remote) {
   if (!remote) return null;
@@ -602,31 +697,48 @@ async function collectFacts(dir, force) {
     site: null,
     stack: [],
     kind: "folder",
-    deployments: []
+    deployments: [],
+    ahead: null,
+    behind: null,
+    dirtySince: null,
+    detached: false
   };
   if (!isDir) {
     const result2 = { ...base };
     factsCache.set(dir, { at: Date.now(), data: result2 });
     return result2;
   }
-  const [branchOut, statusOut, remoteOut, pkg, composer] = await Promise.all([
+  const [branchOut, statusOut, remoteOut, upstreamOut, aheadBehindOut, pkg, composer] = await Promise.all([
     run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]),
     run("git", ["-C", dir, "status", "--porcelain"]),
     run("git", ["-C", dir, "config", "--get", "remote.origin.url"]),
+    run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]),
+    run("git", ["-C", dir, "rev-list", "--left-right", "--count", "@{u}...HEAD"]),
     readJson(import_node_path.default.join(dir, "package.json")),
     readJson(import_node_path.default.join(dir, "composer.json"))
   ]);
   let branch = branchOut?.trim() || null;
-  if (branch === "HEAD") {
+  const detached = branch === "HEAD";
+  if (detached) {
     const sha = (await run("git", ["-C", dir, "rev-parse", "--short", "HEAD"]))?.trim();
     branch = sha ? `detached@${sha}` : "detached";
   }
   const dirty = statusOut == null ? null : statusOut.split("\n").filter((line) => line.trim().length > 0).length;
   const remote = remoteOut?.trim() || null;
+  let ahead = null;
+  let behind = null;
+  if (upstreamOut?.trim()) {
+    const match = aheadBehindOut?.trim().match(/^(\d+)\s+(\d+)$/);
+    if (match) {
+      behind = Number(match[1]);
+      ahead = Number(match[2]);
+    }
+  }
+  const dirtySince = dirty ? await dirtySinceMs(dir, statusOut) : null;
   const [site, stack, deployments] = await Promise.all([
     detectSite(dir, pkg, composer),
     detectStack(dir, pkg, composer),
-    buildDeployments(dir, pkg, composer, remote)
+    buildDeployments(dir, pkg, composer, remote, force)
   ]);
   const result = {
     ...base,
@@ -637,7 +749,11 @@ async function collectFacts(dir, force) {
     site,
     stack,
     kind: remote ? "repo" : "folder",
-    deployments
+    deployments,
+    ahead,
+    behind,
+    dirtySince,
+    detached
   };
   factsCache.set(dir, { at: Date.now(), data: result });
   return result;
@@ -788,6 +904,102 @@ async function knowledgeFor(projectId) {
   knowledgeCache.set(projectId, { at: Date.now(), data });
   return data;
 }
+var GIT_TTL_MS = 2 * 60 * 1e3;
+var GIT_DAYS = 182;
+async function gitHistory(dir, force) {
+  const cached = gitCache.get(dir);
+  if (!force && cached && Date.now() - cached.at < GIT_TTL_MS) return cached.data;
+  const empty = (partial = {}) => ({
+    available: false,
+    days: [],
+    total: 0,
+    bestStreak: 0,
+    currentStreak: 0,
+    lastCommit: null,
+    ahead: null,
+    behind: null,
+    upstream: null,
+    dirtySince: null,
+    detached: false,
+    ...partial
+  });
+  const gitDir = await run("git", ["-C", dir, "rev-parse", "--git-dir"]);
+  if (gitDir == null) {
+    const data2 = empty();
+    gitCache.set(dir, { at: Date.now(), data: data2 });
+    return data2;
+  }
+  const end = /* @__PURE__ */ new Date();
+  end.setHours(12, 0, 0, 0);
+  const start = new Date(end.getTime() - (GIT_DAYS - 1) * 864e5);
+  const since = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}-${String(start.getDate()).padStart(2, "0")}`;
+  const counts = /* @__PURE__ */ new Map();
+  const log = await run("git", [
+    "-C",
+    dir,
+    "log",
+    "--all",
+    "--since",
+    `${since} 00:00:00`,
+    "--pretty=format:%ad",
+    "--date=short",
+    "-n",
+    "50000"
+  ]);
+  if (log) {
+    for (const line of log.split("\n")) {
+      const date = line.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(date)) counts.set(date, (counts.get(date) ?? 0) + 1);
+    }
+  }
+  const days = [];
+  const cursor = new Date(start);
+  while (days.length < GIT_DAYS) {
+    const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`;
+    days.push({ date: key, commits: counts.get(key) ?? 0 });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  let bestStreak = 0;
+  let streak = 0;
+  for (const day of days) {
+    streak = day.commits > 0 ? streak + 1 : 0;
+    if (streak > bestStreak) bestStreak = streak;
+  }
+  let currentStreak = 0;
+  const from = days.length && days[days.length - 1].commits === 0 ? days.length - 2 : days.length - 1;
+  for (let index = from; index >= 0 && days[index].commits > 0; index -= 1) currentStreak += 1;
+  let lastCommit = null;
+  const last = await run("git", ["-C", dir, "log", "-1", "--pretty=format:%H%x1f%s%x1f%at"]);
+  if (last) {
+    const [hash, subject, at] = last.split("");
+    if (hash && at && /^\d+$/.test(at.trim())) {
+      lastCommit = { hash: hash.trim().slice(0, 7), subject: (subject ?? "").trim().slice(0, 160), at: Number(at.trim()) * 1e3 };
+    }
+  }
+  const [branchOut, statusOut, sync] = await Promise.all([
+    run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]),
+    run("git", ["-C", dir, "status", "--porcelain"]),
+    gitAheadBehind(dir)
+  ]);
+  const detached = branchOut?.trim() === "HEAD";
+  const dirtyCount = statusOut == null ? 0 : statusOut.split("\n").filter((line) => line.trim().length > 0).length;
+  const dirtySince = dirtyCount ? await dirtySinceMs(dir, statusOut) : null;
+  const data = {
+    available: true,
+    days,
+    total: days.reduce((sum, day) => sum + day.commits, 0),
+    bestStreak,
+    currentStreak,
+    lastCommit,
+    ahead: sync.ahead,
+    behind: sync.behind,
+    upstream: sync.upstream,
+    dirtySince,
+    detached
+  };
+  gitCache.set(dir, { at: Date.now(), data });
+  return data;
+}
 function reveal(dir) {
   const [bin, args] = process.platform === "win32" ? ["explorer.exe", [dir]] : process.platform === "darwin" ? ["open", [dir]] : ["xdg-open", [dir]];
   try {
@@ -825,7 +1037,7 @@ var server = import_node_http.default.createServer(async (req, res) => {
       const manual = normalizeUrl(url.searchParams.get("site"));
       let deployments = facts.deployments;
       if (manual) {
-        const probed = await probeUrl(manual);
+        const probed = await probeUrl(manual, force);
         deployments = [
           { kind: "manual", label: "Site", url: manual, source: "manual", ...probed },
           ...deployments.filter((item) => item.url !== manual)
@@ -853,6 +1065,11 @@ var server = import_node_http.default.createServer(async (req, res) => {
       const [activity, knowledge] = await Promise.all([activityFor(dir, days), knowledgeFor(projectId)]);
       return json(res, 200, { ...activity, knowledge });
     }
+    if (req.method === "GET" && url.pathname === "/git") {
+      const dir = safeDir(url.searchParams.get("directory"));
+      if (!dir) return json(res, 400, { error: "bad directory" });
+      return json(res, 200, await gitHistory(dir, url.searchParams.get("force") === "1"));
+    }
     if (req.method === "POST" && url.pathname === "/reveal") {
       const payload = JSON.parse(await readBody(req) || "{}");
       const dir = safeDir(payload.directory);
@@ -865,6 +1082,7 @@ var server = import_node_http.default.createServer(async (req, res) => {
       if (!dir) return json(res, 400, { error: "bad directory" });
       factsCache.delete(dir);
       iconCache.delete(dir);
+      gitCache.delete(dir);
       const facts = await collectFacts(dir, true);
       const size = ensureSize(dir, true);
       return json(res, 200, { ...facts, size });

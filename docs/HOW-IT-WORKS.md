@@ -27,7 +27,7 @@ The Host API provides:
 | `openUrl(url)` | GitHub, deployments |
 | `writeClipboard(text)` | **Copy path** |
 | `generate({ … })` | the AI blurb |
-| `storage` | manual site URLs, blurb cache, the AI toggle |
+| `storage` | manual site URLs, blurb cache, settings, pins/groups/hidden, probe history |
 | `serviceRequest({ … })` | everything the service answers |
 
 Project **icons are not exposed by the Host API**. Instead of scraping, the service reads
@@ -41,13 +41,14 @@ It listens on `127.0.0.1:$OPENCHAMBER_SERVICE_PORT` and requires
 | Route | Returns |
 | --- | --- |
 | `GET /health` | `{ ok: true }`, the readiness probe |
-| `GET /vitals?directory=…` | branch, dirty, remote, stack, deployments, favicon, size state |
+| `GET /vitals?directory=…` | branch, dirty, remote, ahead/behind, stack, deployments (live, ms, cert), favicon, size state |
+| `GET /git?directory=…&force=` | 182-day commit series, streaks, last commit, sync state |
 | `GET /size?directory=…` | disk usage state, starting the background walk if needed |
 | `GET /readme?directory=…` | up to 8 KB of README plus a change hash |
 | `GET /projects` | project list, icons and colours from OpenChamber's settings |
 | `GET /activity?directory=…&projectId=…&days=N` | daily activity, totals, plans and todos |
 | `POST /reveal` | open the folder in Explorer / Finder |
-| `POST /refresh` | drop the cached facts and size for one folder |
+| `POST /refresh` | drop the cached facts, git history and size for one folder |
 
 Paths must be absolute. A relative path is a `400` — the service has no "current project".
 
@@ -56,10 +57,15 @@ Paths must be absolute. A relative path is a `400` — the service has no "curre
 | Feature | Read |
 | --- | --- |
 | Branch, dirty count, remote | `git rev-parse`, `git status --porcelain`, `git config remote.origin.url` |
+| Ahead/behind, upstream | `git rev-parse … @{u}`, `git rev-list --left-right --count @{u}...HEAD` |
+| Stale dirty files | oldest `mtime` among the files in `git status --porcelain` (capped at 100) |
+| Commit heatmap | `git log --all --since=<182 days ago> --pretty=format:%ad --date=short -n 50000` |
+| Last commit | `git log -1 --pretty=format:%H%x1f%s%x1f%at` |
 | Disk size | recursive `readdir`/`stat`, 12 s / 300k file budget, one project at a time |
 | Stack | `package.json`, `composer.json`, marker files, lockfiles |
 | Deployments | `CNAME`, `homepage`, `.env*`, `fly.toml`, `wrangler.toml`, `.firebaserc`, `render.yaml`, `gh-pages`, manual URL |
 | Live status | `GET` on the deployment URL, 4.5 s timeout, redirects followed |
+| TLS certificate | `node:tls` connect to host:443 with SNI, 4 s timeout, verification off |
 | Activity | `opencode stats --json --full --days N --project .`, run in the project folder |
 | Plans and todos | `~/.config/openchamber/projects/<project id>/context.json` and its markdown plans |
 | Icon | `~/.config/openchamber/project-icons/project-<sha1(project id)>.<ext>` |
@@ -73,8 +79,9 @@ The config directory is `~/.config/openchamber`, or
 | Data | TTL |
 | --- | --- |
 | Git, stack, deployments | 30 s |
+| Git history (`/git`) | 2 min per directory |
 | Disk size | 12 h |
-| Deployment probe | 10 min |
+| Deployment probe (live, ms, cert) | 10 min (`force=1` on `/vitals` re-probes) |
 | Projects and icons | 2 min |
 | Activity | 2 min per project and range |
 | Plans and todos | 60 s |
@@ -92,11 +99,38 @@ Plan progress is counted from Markdown checkboxes (`- [ ]`, `- [x]`) in each pla
 by `context.json`. Open todos come from the same file. These are OpenChamber's internal
 formats; an unknown shape degrades to "no notes, todos or plans" rather than failing.
 
+## Commits, sync and deployments
+
+`/git` gap-fills the last 182 days (`{ date, commits }`), so the heatmap always has one
+cell per day, and returns `available: false` for non-repo folders. Streaks count consecutive
+commit days (the current one tolerates today being empty); the log is capped at 50 000 lines.
+
+The `/vitals` payload also carries the cheap sync state (`ahead`, `behind`, `dirtySince`,
+`detached`) so cards can show `↑N` / `↓N` chips without a second request. `dirtySince` is
+the oldest `mtime` among changed files; the card only flags it from 3 days up.
+
+Each deployment probe records response time (`ms`) and, for `https` URLs only, the TLS
+certificate (`validTo`, `daysLeft`, issuer CN/O, whether the chain verified). Verification
+is off so expired or self-signed certificates are reported rather than failing. The panel
+appends `{ at, live, ms }` per URL to `atlas:v1:probes:<projectId>` after each vitals load
+(capped at 40 entries, no append within 5 minutes) and derives "down since" from the current
+trailing run of failures. The UI says what it is: checks observed while Atlas is open, not
+continuous monitoring. A down deployment adds 500 to the "Needs me" score; an invalid or
+soon-expiring (≤ 7 days) certificate adds 400.
+
+## Pins, groups and hidden projects
+
+One storage key per project, `atlas:v1:meta:<projectId>` =
+`{ pinned, group, hidden }`, deleted again when it holds only defaults. Board settings
+(group on/off, collapsed sections, show-hidden) live in `atlas:v1:settings` next to the AI
+toggle. Search also matches the group name; hidden projects leave the footer count.
+
 ## Privacy and network
 
 - No telemetry, no analytics, no accounts.
-- Outbound network requests happen only for deployment checks (one `GET` per detected URL)
-  and, if you enable blurbs, the Small Model call made by OpenChamber.
+- Outbound network requests happen only for deployment checks: one `GET` per detected URL
+  (4.5 s timeout) plus a short TLS handshake to port 443 to read the certificate (4 s
+  timeout), both from your machine.
 - The service reads the paths the panel sends, OpenChamber's config directory, and the
   project's own files. It writes nothing except through OpenChamber's UI actions.
 - The service token and OpenChamber's host token never reach the panel.
@@ -105,7 +139,9 @@ formats; an unknown shape degrades to "no notes, todos or plans" rather than fai
 
 - `openSurface` targets the open project, so **Files** and **Git** appear only on that
   project's card.
-- Steps count agent steps, not minutes or commits.
+- Steps count agent steps, not minutes or commits — the **Commits** panel is the honest signal.
+- The probe history only records checks observed while Atlas is open (one entry per URL per
+  5 minutes, 40 kept); it is not continuous monitoring.
 - The activity graph needs `opencode` on `PATH`; the app's bundled CLI is tried as a fallback
   on Windows.
 - Deployment detection only sees what is committed in the repo (and `.env` files). Many

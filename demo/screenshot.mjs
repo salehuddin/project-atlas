@@ -33,10 +33,10 @@ if (!browserPath) {
 }
 
 const shots = [
-  { file: "board.png", query: "", hash: "", width: 1280 },
+  { file: "board.png", query: "", hash: "", width: 1000, height: 1040 },
   { file: "project.png", query: "", hash: "#project=Lumen%20Bakery", width: 1280 },
   { file: "rail.png", query: "?surface=panel", hash: "", width: 440, height: 900 },
-  { file: "board-light.png", query: "?theme=light", hash: "", width: 1280 },
+  { file: "board-light.png", query: "?theme=light", hash: "", width: 1000, height: 1040 },
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -24,16 +24,19 @@ project metadata.
 ## Features
 
 - **Board** — a full-screen page, and the same board in the rail. Search, sort by "needs me",
-  recent, name or size.
+  recent, name or size. Pin the important ones, group them into sections, hide the rest.
 - **Real project icons** — the uploaded icon and colour from OpenChamber's project list, with
   a repo `favicon` and a coloured initial as fallbacks.
-- **Vitals** — branch, dirty file count, disk size and file count, stack chips
+- **Vitals** — branch, dirty file count, unpushed (`↑N`) / behind (`↓N`) commits, stale
+  dirty files (`dirty Nd`), disk size and file count, stack chips
   (`Next.js`, `Laravel`, `Docker`, `pnpm`…), chats, worktrees and last activity.
 - **Deployments** — detected from `CNAME`, `homepage`, `.env` URLs, `fly.toml`,
   `wrangler.toml`, `.firebaserc`, `render.yaml` and `gh-pages`, each probed for a live
-  status. Add a URL by hand when detection cannot know it.
-- **Project page** — click a project name: activity over 7 / 30 / 90 days, totals (steps,
-  prompts, sessions, active days, streak, cost), then the plans with open steps and the open
+  status, response time and (for `https`) certificate expiry. Add a URL by hand when
+  detection cannot know it.
+- **Project page** — click a project name: activity over 7 / 30 / 90 days, a 26-week
+  **Commits** heatmap with streaks and the last commit, the **Deployments** panel with
+  recent-check dots and "down since", then the plans with open steps and the open
   todos.
 - **AI blurb** — two lines per project, written by your Small Model from the README, cached
   and regenerable.
@@ -92,12 +95,17 @@ The approval dialog lists exactly this:
 
 The service is not sandboxed — it runs with your user rights, like any local tool. It only
 reads the paths the panel sends, OpenChamber's config directory, and runs `git` and
-`opencode`. See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the exact reads and the
+`opencode`. Deployment probes make one plain HTTPS request per URL plus a short TLS
+handshake (port 443, SNI) to read the certificate — nothing else leaves your machine.
+See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the exact reads and the
 network calls it makes.
 
 ## Using it
 
 - **The name** opens the project page; **← All projects** returns.
+- **☆/★** pins a card to the top; **+ group** files it into a named section.
+  **Group: On/Off** in the header toggles the sections; **Hidden (N)** reveals archived
+  projects so you can unhide them.
 - **Resume** opens the last chat, **Start chat** creates one when the project is new.
 - **Files** and **Git** open those screens for the project that is currently open — the
   extension API always targets the open project, so for others use Resume first.
@@ -120,13 +128,15 @@ flowchart LR
 | --- | --- |
 | Projects, chats, worktrees, unread | OpenChamber Host API |
 | Icon, colour | `~/.config/openchamber/settings.json` + `project-icons/` |
-| Branch, dirty files, remote | `git` in the project |
+| Branch, dirty files, remote, ahead/behind | `git` in the project |
 | Size, files | recursive walk, cached 12 h, partial results marked `+` |
 | Stack | manifests and marker files |
-| Deployments | config files + `.env` URLs, then an HTTP check from your machine |
+| Deployments | config files + `.env` URLs, then an HTTP check and a TLS handshake from your machine |
 | Activity, cost | `opencode stats --json --full` |
+| Commits, streaks | `git log` over the last 182 days |
 | Plans, todos | `~/.config/openchamber/projects/<id>/context.json` and its markdown |
 | Blurb | your Small Model, cached by README hash |
+| Pins, groups, hidden, probe history | panel storage (`atlas:v1:meta:*`, `atlas:v1:probes:*`, settings) |
 
 More detail, including every HTTP route the service exposes, is in
 [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).

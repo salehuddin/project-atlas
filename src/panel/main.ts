@@ -24,6 +24,14 @@ type SizeInfo = {
   truncated: boolean;
 };
 
+type CertInfo = {
+  validTo: number | null;
+  daysLeft: number | null;
+  issuer: string | null;
+  authorized: boolean;
+  error?: string;
+};
+
 type Deployment = {
   kind: string;
   label: string;
@@ -31,6 +39,8 @@ type Deployment = {
   source: string;
   live: boolean | null;
   status: number | null;
+  ms: number | null;
+  cert: CertInfo | null;
 };
 
 type Vitals = {
@@ -47,6 +57,36 @@ type Vitals = {
   deployments: Deployment[];
   iconUrl: string | null;
   size: SizeInfo;
+  ahead: number | null;
+  behind: number | null;
+  dirtySince: number | null;
+  detached: boolean;
+};
+
+type ProjectMeta = {
+  pinned?: boolean;
+  group?: string | null;
+  hidden?: boolean;
+};
+
+type ProbeEntry = { at: number; live: boolean | null; ms: number | null };
+
+type GitDay = { date: string; commits: number };
+
+type GitCommit = { hash: string; subject: string; at: number };
+
+type GitData = {
+  available: boolean;
+  days: GitDay[];
+  total: number;
+  bestStreak: number;
+  currentStreak: number;
+  lastCommit: GitCommit | null;
+  ahead: number | null;
+  behind: number | null;
+  upstream: string | null;
+  dirtySince: number | null;
+  detached: boolean;
 };
 
 type Card = {
@@ -62,6 +102,9 @@ type Card = {
   manualSite: string | null;
   editingSite: boolean;
   siteDraft: string;
+  meta: ProjectMeta;
+  editingGroup: boolean;
+  groupDraft: string;
   icon: string | null;
   iconColor: string | null;
 };
@@ -103,7 +146,11 @@ type ActivityData = {
 
 const SUMMARY_PREFIX = "atlas:v1:summary:";
 const SITE_PREFIX = "atlas:v1:site:";
+const META_PREFIX = "atlas:v1:meta:";
+const PROBE_PREFIX = "atlas:v1:probes:";
 const SETTINGS_KEY = "atlas:v1:settings";
+
+type Settings = { ai: boolean; groupOn: boolean; collapsed: Record<string, boolean>; showHidden: boolean };
 
 const SYSTEM_PROMPT =
   "You write project blurbs. Two sentences, at most 45 words. Say what the project is, " +
@@ -116,6 +163,9 @@ const state = {
   query: "",
   sort: "attention",
   ai: true,
+  groupOn: true,
+  collapsed: {} as Record<string, boolean>,
+  showHidden: false,
   directory: null as string | null,
   surface: "panel",
   serviceDown: false,
@@ -127,10 +177,15 @@ const state = {
   activity: null as ActivityData | null,
   activityState: "idle" as "idle" | "loading" | "ready" | "error",
   activityFor: null as string | null,
+  git: null as GitData | null,
+  gitState: "idle" as "idle" | "loading" | "ready" | "error",
+  gitFor: null as string | null,
+  probes: new Map<string, Record<string, ProbeEntry[]>>(),
 };
 
 const summaryCache = new Map<string, { text: string; hash: string }>();
 const siteCache = new Map<string, string>();
+const metaCache = new Map<string, ProjectMeta>();
 const iconIndex = new Map<string, { icon: string | null; color: string | null }>();
 
 const summaryQueue: Card[] = [];
@@ -143,6 +198,8 @@ const searchEl = document.querySelector<HTMLInputElement>("#search")!;
 const sortEl = document.querySelector<HTMLSelectElement>("#sort")!;
 const aiEl = document.querySelector<HTMLInputElement>("#ai")!;
 const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
+const groupEl = document.querySelector<HTMLButtonElement>("#group")!;
+const hiddenEl = document.querySelector<HTMLButtonElement>("#hidden-toggle")!;
 const noticeEl = document.querySelector<HTMLElement>("#notice")!;
 const gridEl = document.querySelector<HTMLElement>("#grid")!;
 const footerEl = document.querySelector<HTMLElement>("#footer")!;
@@ -167,7 +224,15 @@ function chip(text: string, cls = ""): HTMLSpanElement {
 /* -------------------------------------------------------------- render */
 
 function render(): void {
-  countEl.textContent = String(state.cards.length);
+  const visible = state.cards.filter((card) => !card.meta.hidden);
+  countEl.textContent = String(visible.length);
+
+  const hiddenCount = state.cards.length - visible.length;
+  hiddenEl.hidden = hiddenCount === 0 && !state.showHidden;
+  hiddenEl.textContent = state.showHidden ? `Hide hidden (${hiddenCount})` : `Hidden (${hiddenCount})`;
+  hiddenEl.setAttribute("aria-pressed", String(state.showHidden));
+  groupEl.textContent = `Group: ${state.groupOn ? "On" : "Off"}`;
+  groupEl.setAttribute("aria-pressed", String(state.groupOn));
 
   if (state.view === "project") {
     const card = state.cards.find((item) => item.project.id === state.viewId);
@@ -175,7 +240,7 @@ function render(): void {
     gridEl.replaceChildren(card ? renderDetail(card) : mutedLine("That project is no longer open."));
   } else {
     gridEl.dataset.mode = "board";
-    gridEl.replaceChildren(...visibleCards().map(renderCard));
+    gridEl.replaceChildren(...renderBoard());
     if (state.cards.length === 0) {
       const empty = div("empty");
       const title = document.createElement("b");
@@ -186,6 +251,69 @@ function render(): void {
   }
 
   footerEl.textContent = footerText();
+}
+
+/** Board rows: one flat pinned-first list, or Pinned / group / Ungrouped sections. */
+function renderBoard(): HTMLElement[] {
+  const list = visibleCards();
+  if (!state.groupOn) {
+    const pinned = list.filter((card) => card.meta.pinned);
+    const rest = list.filter((card) => !card.meta.pinned);
+    return [...pinned, ...rest].map(renderCard);
+  }
+
+  const nodes: HTMLElement[] = [];
+  const pinned = list.filter((card) => card.meta.pinned);
+  const rest = list.filter((card) => !card.meta.pinned);
+  if (pinned.length) nodes.push(renderSection("Pinned", pinned));
+  const groups = new Map<string, Card[]>();
+  const ungrouped: Card[] = [];
+  for (const card of rest) {
+    const group = card.meta.group?.trim();
+    if (group) {
+      const bucket = groups.get(group);
+      if (bucket) bucket.push(card);
+      else groups.set(group, [card]);
+    } else {
+      ungrouped.push(card);
+    }
+  }
+  for (const name of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {
+    const bucket = groups.get(name);
+    if (bucket) nodes.push(renderSection(name, bucket));
+  }
+  if (ungrouped.length) nodes.push(renderSection("Ungrouped", ungrouped));
+  if (!nodes.length && list.length) nodes.push(...list.map(renderCard));
+  return nodes;
+}
+
+function renderSection(title: string, cards: Card[]): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "section";
+  const key = `section:${title}`;
+  const collapsed = Boolean(state.collapsed[key]);
+
+  const head = document.createElement("button");
+  head.className = "section-head";
+  head.dataset.act = "collapse";
+  head.dataset.section = key;
+  head.setAttribute("aria-expanded", String(!collapsed));
+  head.title = collapsed ? `Expand ${title}` : `Collapse ${title}`;
+  const caret = span("", collapsed ? "▸" : "▾");
+  const label = document.createElement("b");
+  label.textContent = title;
+  head.append(caret, label, span("count", String(cards.length)));
+  section.append(head);
+
+  if (!collapsed) {
+    const body = div("section-body");
+    // Pinned first inside the section, then the board sort.
+    const pinned = cards.filter((card) => card.meta.pinned);
+    const rest = cards.filter((card) => !card.meta.pinned);
+    for (const card of [...pinned, ...rest]) body.append(renderCard(card));
+    section.append(body);
+  }
+  return section;
 }
 
 let rafId = 0;
@@ -202,8 +330,9 @@ function scheduleRender(): void {
 function visibleCards(): Card[] {
   const query = state.query.trim().toLowerCase();
   const list = state.cards.filter((card) => {
+    if (card.meta.hidden && !state.showHidden) return false;
     if (!query) return true;
-    const haystack = [card.project.name, card.project.directory, ...(card.vitals?.stack ?? [])]
+    const haystack = [card.project.name, card.project.directory, card.meta.group ?? "", ...(card.vitals?.stack ?? [])]
       .join(" ")
       .toLowerCase();
     return haystack.includes(query);
@@ -227,8 +356,12 @@ function visibleCards(): Card[] {
 
 function score(card: Card): number {
   const last = card.last;
-  if (!last) return 0;
   let value = 0;
+  for (const dep of card.vitals?.deployments ?? []) {
+    if (dep.live === false) value += 500;
+    if (dep.cert && (!dep.cert.authorized || (dep.cert.daysLeft != null && dep.cert.daysLeft <= 7))) value += 400;
+  }
+  if (!last) return value;
   if (last.activity === "waiting-permission") value += 1000;
   else if (last.activity === "waiting-question") value += 950;
   else if (last.activity === "running" || last.activity === "retrying") value += 900;
@@ -240,7 +373,7 @@ function score(card: Card): number {
 
 function renderCard(card: Card): HTMLElement {
   const el = document.createElement("article");
-  el.className = "card";
+  el.className = `card${card.meta.hidden ? " dim" : ""}`;
   el.dataset.id = card.project.id;
   if (card.project.directory === state.directory) el.dataset.current = "true";
 
@@ -261,7 +394,16 @@ function renderCard(card: Card): HTMLElement {
   name.title = `Open ${card.project.name}`;
   const path = span("path", card.vitals?.shortPath ?? card.project.directory);
   names.append(name, path);
-  top.append(avatar, names, span("ago", ago(card.last?.updatedAt)));
+
+  const pin = document.createElement("button");
+  pin.className = "pin";
+  pin.dataset.act = "pin";
+  pin.dataset.on = String(Boolean(card.meta.pinned));
+  pin.setAttribute("aria-pressed", String(Boolean(card.meta.pinned)));
+  pin.setAttribute("aria-label", card.meta.pinned ? `Unpin ${card.project.name}` : `Pin ${card.project.name}`);
+  pin.title = pin.getAttribute("aria-label") ?? "";
+  pin.textContent = card.meta.pinned ? "★" : "☆";
+  top.append(avatar, names, pin, span("ago", ago(card.last?.updatedAt)));
 
   /* summary */
   const summary = document.createElement("p");
@@ -283,8 +425,11 @@ function renderCard(card: Card): HTMLElement {
   el.append(top, buildMeta(card));
   if (summary.className) el.append(summary);
   if (stack.childElementCount) el.append(stack);
-  if (card.editingSite) el.append(renderSiteEditor(card));
-  el.append(buildActions(card));
+  if (card.editingGroup) el.append(renderGroupEditor(card));
+  else {
+    if (card.editingSite) el.append(renderSiteEditor(card));
+    el.append(buildActions(card));
+  }
   return el;
 }
 
@@ -293,6 +438,24 @@ function buildMeta(card: Card): HTMLElement {
   if (card.vitals) {
     if (card.vitals.branch) meta.append(chip(card.vitals.branch));
     if (card.vitals.dirty) meta.append(chip(`±${card.vitals.dirty}`, "warn"));
+    if (card.vitals.ahead) {
+      const up = chip(`↑${card.vitals.ahead}`, "warn");
+      up.title = `${card.vitals.ahead} unpushed commit${card.vitals.ahead === 1 ? "" : "s"}`;
+      meta.append(up);
+    }
+    if (card.vitals.behind) {
+      const down = chip(`↓${card.vitals.behind}`);
+      down.title = `${card.vitals.behind} commit${card.vitals.behind === 1 ? "" : "s"} behind the upstream`;
+      meta.append(down);
+    }
+    if (card.vitals.dirty && card.vitals.dirtySince) {
+      const ageDays = Math.floor((Date.now() - card.vitals.dirtySince) / 86_400_000);
+      if (ageDays >= 3) {
+        const stale = chip(`dirty ${ageDays}d`, "warn");
+        stale.title = `Uncommitted changes since ${new Date(card.vitals.dirtySince).toLocaleDateString()}`;
+        meta.append(stale);
+      }
+    }
     if (card.vitals.kind === "folder") meta.append(chip("folder"));
     meta.append(chip(sizeLabel(card)));
     if (card.vitals.size.state === "ready" && card.vitals.size.files) {
@@ -304,6 +467,13 @@ function buildMeta(card: Card): HTMLElement {
   if (card.chats) meta.append(chip(`${card.chats} chat${card.chats === 1 ? "" : "s"}`));
   if (card.worktrees) meta.append(chip(`${card.worktrees} tree${card.worktrees === 1 ? "" : "s"}`));
   if (card.last?.outcome === "failed") meta.append(chip("last turn failed", "fail"));
+
+  if (!card.editingGroup) {
+    const group = chip(card.meta.group?.trim() ? card.meta.group.trim() : "+ group", "edit");
+    group.dataset.act = "edit-group";
+    group.title = card.meta.group ? `Group: ${card.meta.group}. Click to change it.` : "Put this project in a group.";
+    meta.append(group);
+  }
 
   const deployments = card.vitals?.deployments ?? [];
   for (const dep of deployments.slice(0, 3)) meta.append(deploymentChip(dep));
@@ -326,6 +496,7 @@ function buildActions(card: Card): HTMLElement {
   if (card.vitals?.web) actions.append(actionButton("GitHub", "github"));
   actions.append(actionButton("Copy path", "copy"));
   if (card.summary) actions.append(actionButton("Rewrite", "rewrite"));
+  actions.append(actionButton(card.meta.hidden ? "Unhide" : "Hide", card.meta.hidden ? "unhide" : "hide"));
   return actions;
 }
 
@@ -361,7 +532,11 @@ function renderDetail(card: Card): HTMLElement {
   }
 
   wrap.append(buildActions(card));
+  if (card.editingGroup) wrap.append(renderGroupEditor(card));
+  if (card.editingSite) wrap.append(renderSiteEditor(card));
   wrap.append(renderActivityPanel(card));
+  wrap.append(renderGitPanel(card));
+  wrap.append(renderDeploymentsPanel(card));
   wrap.append(renderKnowledgePanel(card));
   return wrap;
 }
@@ -443,6 +618,195 @@ function renderChart(points: ActivityPoint[]): HTMLElement {
   legend.append(span("", points[0]?.date ?? ""), span("", points[points.length - 1]?.date ?? ""));
   wrap.append(chart, legend);
   return wrap;
+}
+
+function renderGitPanel(card: Card): HTMLElement {
+  const section = div("panel");
+
+  const head = div("panel-head");
+  const title = document.createElement("h3");
+  title.textContent = "Commits";
+  head.append(title);
+  section.append(head);
+
+  if (state.gitFor !== card.project.id || state.gitState === "loading" || state.gitState === "idle") {
+    section.append(mutedLine("Reading commit history…"));
+    return section;
+  }
+  if (state.gitState === "error" || !state.git) {
+    section.append(mutedLine("Could not read commit history for this project."));
+    return section;
+  }
+
+  const data = state.git;
+  if (!data.available) {
+    section.append(mutedLine("Not a git repository, so there is no commit history."));
+    return section;
+  }
+
+  section.append(renderHeatmap(data.days));
+
+  const stats = div("stats");
+  const cells: Array<[string, string]> = [
+    [data.total.toLocaleString(), "commits in 26 weeks"],
+    [data.currentStreak.toLocaleString(), "current streak (days)"],
+    [data.bestStreak.toLocaleString(), "best streak (days)"],
+  ];
+  for (const [value, label] of cells) {
+    const cell = div("stat");
+    const strong = document.createElement("b");
+    strong.textContent = value;
+    cell.append(strong, span("", label));
+    stats.append(cell);
+  }
+  section.append(stats);
+
+  if (data.lastCommit) {
+    const recent = ago(data.lastCommit.at);
+    section.append(
+      mutedLine(
+        `Last commit ${data.lastCommit.hash} — ${data.lastCommit.subject || "(no message)"} · ${recent && recent !== "now" ? `${recent} ago` : "just now"}`,
+      ),
+    );
+  }
+  if (data.upstream) {
+    const sync: string[] = [];
+    if (data.ahead) sync.push(`↑${data.ahead} unpushed`);
+    if (data.behind) sync.push(`↓${data.behind} behind`);
+    if (sync.length) section.append(mutedLine(`${data.upstream}: ${sync.join(", ")}`));
+  }
+  return section;
+}
+
+/** GitHub-style heatmap: 7 rows (Mon..Sun), one column per week, 5 levels. */
+function renderHeatmap(days: GitDay[]): HTMLElement {
+  const wrap = div("heat-wrap");
+  const max = Math.max(0, ...days.map((day) => day.commits));
+  const levelOf = (commits: number): number => {
+    if (!commits || max <= 0) return 0;
+    return 1 + Math.min(3, Math.floor((commits / max) * 4));
+  };
+
+  // Pad so the first column starts on a Monday; trailing days form the last column.
+  const first = days.length ? new Date(`${days[0].date}T12:00:00`) : new Date();
+  const pad = (first.getDay() + 6) % 7;
+  const cells: (GitDay | null)[] = [...Array<null>(pad).fill(null), ...days];
+  const weeks = Math.max(1, Math.ceil(cells.length / 7));
+
+  const months = div("heat-months");
+  months.style.gridTemplateColumns = `repeat(${weeks}, 1fr)`;
+  let lastMonth = "";
+  for (let week = 0; week < weeks; week += 1) {
+    const cell = cells[week * 7];
+    const label = span("", "");
+    if (cell) {
+      const month = new Date(`${cell.date}T12:00:00`).toLocaleString(undefined, { month: "short" });
+      if (month !== lastMonth) {
+        label.textContent = month;
+        lastMonth = month;
+      }
+    }
+    months.append(label);
+  }
+
+  const grid = div("heat");
+  grid.style.gridTemplateColumns = `repeat(${weeks}, 1fr)`;
+  for (let week = 0; week < weeks; week += 1) {
+    for (let row = 0; row < 7; row += 1) {
+      const cell = cells[week * 7 + row];
+      const node = div("heat-cell");
+      if (!cell) {
+        node.dataset.level = "empty";
+      } else {
+        node.dataset.level = String(levelOf(cell.commits));
+        node.title = `${cell.date}, ${cell.commits} commit${cell.commits === 1 ? "" : "s"}`;
+      }
+      // Monday-first rows, top to bottom.
+      node.style.gridRow = String(row + 1);
+      node.style.gridColumn = String(week + 1);
+      grid.append(node);
+    }
+  }
+  wrap.append(months, grid);
+  return wrap;
+}
+
+function renderDeploymentsPanel(card: Card): HTMLElement {
+  const section = div("panel");
+
+  const head = div("panel-head");
+  const title = document.createElement("h3");
+  title.textContent = "Deployments";
+  const check = actionButton("Check now", "check-now");
+  head.append(title, check);
+  section.append(head);
+
+  section.append(
+    mutedLine("Checks observed while Atlas is open — not continuous monitoring."),
+  );
+
+  const deployments = card.vitals?.deployments ?? [];
+  if (!deployments.length) {
+    section.append(mutedLine("No deployments detected. Add one with + site on the card."));
+    return section;
+  }
+
+  const history = state.probes.get(card.project.id) ?? {};
+  for (const dep of deployments) {
+    const row = div("dep-row");
+    const dot = document.createElement("i");
+    dot.className = "mini-dot";
+    dot.dataset.live = dep.live === true ? "up" : dep.live === false ? "down" : "unknown";
+
+    const link = document.createElement("button");
+    link.className = "dep-host";
+    link.dataset.act = "deploy";
+    link.dataset.url = dep.url;
+    link.textContent = hostOf(dep.url) ?? dep.label;
+    link.title = `${dep.label} · ${dep.source} — open it`;
+    row.append(dot, link);
+
+    const facts: string[] = [];
+    facts.push(dep.status ? `HTTP ${dep.status}` : dep.live === false ? "unreachable" : "not checked");
+    if (dep.ms != null) facts.push(`${dep.ms} ms`);
+    if (dep.cert?.validTo != null) {
+      const days = dep.cert.daysLeft;
+      facts.push(days != null && days < 0 ? `cert expired ${new Date(dep.cert.validTo).toLocaleDateString()}` : `cert expires ${new Date(dep.cert.validTo).toLocaleDateString()} (${days}d)`);
+    }
+    row.append(span("dep-facts", facts.join(" · ")));
+
+    const entries = history[dep.url] ?? [];
+    const downSince = downSinceMs(entries);
+    if (dep.live === false && downSince != null) {
+      const recent = ago(downSince);
+      const down = span("dep-down", `down since ${recent && recent !== "now" ? `${recent} ago` : "just now"}`);
+      row.append(down);
+    }
+
+    if (entries.length) {
+      const dots = div("probe-dots");
+      for (const entry of entries.slice(-20)) {
+        const mark = document.createElement("i");
+        mark.className = "probe-dot";
+        mark.dataset.live = entry.live === true ? "up" : entry.live === false ? "down" : "unknown";
+        mark.title = `${new Date(entry.at).toLocaleString()} · ${entry.live === true ? "up" : entry.live === false ? "down" : "unknown"}${entry.ms != null ? ` · ${entry.ms} ms` : ""}`;
+        dots.append(mark);
+      }
+      row.append(dots);
+    }
+    section.append(row);
+  }
+  return section;
+}
+
+/** Timestamp of the first entry in the current trailing run of failed checks. */
+function downSinceMs(entries: ProbeEntry[]): number | null {
+  let first: number | null = null;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index].live !== false) break;
+    first = entries[index].at;
+  }
+  return first;
 }
 
 function renderKnowledgePanel(card: Card): HTMLElement {
@@ -537,6 +901,58 @@ async function loadActivity(card: Card, days = state.range): Promise<void> {
   render();
 }
 
+/** Commit heatmap, loaded lazily like /size so a slow git log never blocks the page. */
+async function loadGit(card: Card): Promise<void> {
+  state.gitFor = card.project.id;
+  state.gitState = "loading";
+  state.git = null;
+  render();
+
+  try {
+    const response = await host.serviceRequest({
+      method: "GET",
+      path: "/git",
+      query: { directory: card.project.directory },
+    });
+    if (response.status !== 200) throw new Error(`service answered ${response.status}`);
+    if (state.gitFor !== card.project.id) return;
+    state.git = JSON.parse(response.body) as GitData;
+    state.gitState = "ready";
+  } catch {
+    if (state.gitFor !== card.project.id) return;
+    state.gitState = "error";
+  }
+  render();
+}
+
+/**
+ * Per-project probe history: after each vitals load, append `{ at, live, ms }`
+ * per deployment URL, capped at 40 entries. Skips the append when the last
+ * entry is under 5 minutes old, so refreshes do not flood the dots.
+ */
+async function recordProbes(card: Card): Promise<void> {
+  const deployments = card.vitals?.deployments ?? [];
+  if (!deployments.length) return;
+  let history = state.probes.get(card.project.id);
+  if (!history) {
+    history = {};
+    state.probes.set(card.project.id, history);
+  }
+  let dirty = false;
+  const now = Date.now();
+  for (const dep of deployments) {
+    const entries = history[dep.url] ?? [];
+    const last = entries[entries.length - 1];
+    if (last && now - last.at < 5 * 60_000) continue;
+    entries.push({ at: now, live: dep.live, ms: dep.ms ?? null });
+    history[dep.url] = entries.slice(-40);
+    dirty = true;
+  }
+  if (dirty) {
+    await host.storage.set(`${PROBE_PREFIX}${card.project.id}`, history).catch(() => {});
+  }
+}
+
 function renderSiteEditor(card: Card): HTMLElement {
   const row = div("editor");
   const input = document.createElement("input");
@@ -560,6 +976,47 @@ function renderSiteEditor(card: Card): HTMLElement {
   row.append(input, save, cancel);
   requestAnimationFrame(() => input.focus());
   return row;
+}
+
+function renderGroupEditor(card: Card): HTMLElement {
+  const row = div("editor");
+  const input = document.createElement("input");
+  input.placeholder = "Group name (empty clears)…";
+  input.value = card.groupDraft;
+  input.dataset.groupInput = card.project.id;
+  input.setAttribute("aria-label", `Group for ${card.project.name}`);
+  input.setAttribute("list", "atlas-groups");
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveGroup(card);
+    }
+    if (event.key === "Escape") {
+      card.editingGroup = false;
+      render();
+    }
+  });
+  const data = document.createElement("datalist");
+  data.id = "atlas-groups";
+  for (const group of existingGroups()) {
+    const option = document.createElement("option");
+    option.value = group;
+    data.append(option);
+  }
+  const save = actionButton("Save", "save-group", "primary");
+  const cancel = actionButton("Cancel", "cancel-group");
+  row.append(input, data, save, cancel);
+  requestAnimationFrame(() => input.focus());
+  return row;
+}
+
+function existingGroups(): string[] {
+  const names = new Set<string>();
+  for (const card of state.cards) {
+    const group = card.meta.group?.trim();
+    if (group) names.add(group);
+  }
+  return [...names].sort((a, b) => a.localeCompare(b));
 }
 
 function actionButton(label: string, act: string, cls = ""): HTMLButtonElement {
@@ -613,18 +1070,46 @@ function deploymentChip(dep: Deployment): HTMLElement {
   dot.dataset.live = dep.live === true ? "up" : dep.live === false ? "down" : "unknown";
 
   button.append(dot, document.createTextNode(hostOf(dep.url) ?? dep.label));
+  button.append(certBadge(dep.cert));
   const detail = dep.status
     ? `HTTP ${dep.status}`
     : dep.live === false
       ? "unreachable"
       : "not checked yet";
-  button.title = `${dep.label} · ${dep.source} · ${detail}`;
+  button.title = `${dep.label} · ${dep.source} · ${detail}${dep.ms != null ? ` · ${dep.ms} ms` : ""}${certTitle(dep.cert)}`;
   return button;
 }
 
+/** Small `cert 9d` / `cert expired` badge; empty span when there is no cert. */
+function certBadge(cert: CertInfo | null): HTMLElement {
+  const badge = document.createElement("span");
+  if (!cert || cert.daysLeft == null) return badge;
+  if (cert.daysLeft < 0) {
+    badge.className = "cert fail";
+    badge.textContent = "cert expired";
+  } else if (!cert.authorized || cert.daysLeft <= 7) {
+    badge.className = "cert fail";
+    badge.textContent = `cert ${cert.daysLeft}d`;
+  } else if (cert.daysLeft <= 21) {
+    badge.className = "cert warn";
+    badge.textContent = `cert ${cert.daysLeft}d`;
+  }
+  return badge;
+}
+
+function certTitle(cert: CertInfo | null): string {
+  if (!cert || cert.validTo == null) return "";
+  const expiry = new Date(cert.validTo).toLocaleDateString();
+  const issuer = cert.issuer ? `, issued to ${cert.issuer}` : "";
+  const state = cert.daysLeft != null && cert.daysLeft < 0 ? "expired" : cert.authorized ? "valid" : `invalid (${cert.error ?? "not trusted"})`;
+  return ` · cert ${state}, expires ${expiry}${issuer}`;
+}
+
 function footerText(): string {
-  const total = state.cards.length;
-  const parts = [`${total} project${total === 1 ? "" : "s"}`];
+  const hidden = state.cards.filter((card) => card.meta.hidden);
+  const visibleCount = state.cards.length - hidden.length;
+  const parts = [`${visibleCount} project${visibleCount === 1 ? "" : "s"}`];
+  if (hidden.length && !state.showHidden) parts.push(`${hidden.length} hidden`);
   if (state.serviceDown) parts.push("local service offline");
   const measuring = state.cards.filter((card) => card.vitals?.size.state === "running").length;
   if (measuring) parts.push(`measuring ${measuring}`);
@@ -635,8 +1120,13 @@ function footerText(): string {
 
 async function boot(): Promise<void> {
   try {
-    const settings = await host.storage.get(SETTINGS_KEY).catch(() => null);
-    if (settings && typeof settings.ai === "boolean") state.ai = settings.ai;
+    const settings = (await host.storage.get(SETTINGS_KEY).catch(() => null)) as Partial<Settings> | null;
+    if (settings) {
+      if (typeof settings.ai === "boolean") state.ai = settings.ai;
+      if (typeof settings.groupOn === "boolean") state.groupOn = settings.groupOn;
+      if (typeof settings.showHidden === "boolean") state.showHidden = settings.showHidden;
+      if (settings.collapsed && typeof settings.collapsed === "object") state.collapsed = settings.collapsed;
+    }
     aiEl.checked = state.ai;
 
     const keys = await host.storage.keys().catch(() => [] as string[]);
@@ -650,6 +1140,21 @@ async function boot(): Promise<void> {
         } else if (key.startsWith(SITE_PREFIX)) {
           const value = await host.storage.get(key).catch(() => null);
           if (value && typeof value.site === "string") siteCache.set(key.slice(SITE_PREFIX.length), value.site);
+        } else if (key.startsWith(META_PREFIX)) {
+          const value = (await host.storage.get(key).catch(() => null)) as Partial<ProjectMeta> | null;
+          if (value && typeof value === "object") {
+            metaCache.set(key.slice(META_PREFIX.length), {
+              pinned: value.pinned === true,
+              group: typeof value.group === "string" && value.group.trim() ? value.group.trim() : null,
+              hidden: value.hidden === true,
+            });
+          }
+        } else if (key.startsWith(PROBE_PREFIX)) {
+          const value = await host.storage.get(key).catch(() => null);
+          if (value && typeof value === "object") {
+            const id = key.slice(PROBE_PREFIX.length);
+            state.probes.set(id, value as Record<string, ProbeEntry[]>);
+          }
         }
       }),
     );
@@ -659,6 +1164,7 @@ async function boot(): Promise<void> {
     const snapshot = await host.listProjects();
     state.cards = (snapshot.projects ?? []).map((project) => {
       const known = iconIndex.get(project.id) ?? iconIndex.get(normDir(project.directory));
+      const meta = metaCache.get(project.id);
       return {
         project,
         sessions: [],
@@ -672,6 +1178,9 @@ async function boot(): Promise<void> {
         manualSite: siteCache.get(project.id) ?? null,
         editingSite: false,
         siteDraft: "",
+        meta: meta ? { ...meta } : {},
+        editingGroup: false,
+        groupDraft: "",
         icon: known?.icon ?? null,
         iconColor: known?.color ?? null,
       };
@@ -753,6 +1262,7 @@ async function loadVitals(card: Card, force: boolean): Promise<void> {
     ensureSizePolling();
     maybeSummarize(card);
     scheduleRender();
+    void recordProbes(card);
   } catch (error) {
     const code = errorCode(error);
     if (code === "NO_SERVICE" || code === "SERVICE_FAILED") {
@@ -917,6 +1427,16 @@ function findCard(id: string | undefined): Card | undefined {
 gridEl.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement).closest<HTMLElement>("[data-act]");
   if (!target) return;
+
+  if (target.dataset.act === "collapse") {
+    const key = target.dataset.section ?? "";
+    state.collapsed[key] = !state.collapsed[key];
+    if (!state.collapsed[key]) delete state.collapsed[key];
+    void saveSettings();
+    render();
+    return;
+  }
+
   const id =
     target.closest<HTMLElement>(".card")?.dataset.id ??
     (state.view === "project" ? state.viewId ?? undefined : undefined);
@@ -934,10 +1454,44 @@ gridEl.addEventListener("click", (event) => {
 
 gridEl.addEventListener("input", (event) => {
   const input = event.target as HTMLInputElement;
-  if (!input.matches("[data-site-input]")) return;
-  const card = findCard(input.dataset.siteInput);
-  if (card) card.siteDraft = input.value;
+  if (input.matches("[data-site-input]")) {
+    const card = findCard(input.dataset.siteInput);
+    if (card) card.siteDraft = input.value;
+    return;
+  }
+  if (input.matches("[data-group-input]")) {
+    const card = findCard(input.dataset.groupInput);
+    if (card) card.groupDraft = input.value;
+  }
 });
+
+async function saveSettings(): Promise<void> {
+  const settings: Settings = { ai: state.ai, groupOn: state.groupOn, collapsed: state.collapsed, showHidden: state.showHidden };
+  await host.storage.set(SETTINGS_KEY, settings).catch(() => {});
+}
+
+/** One storage key per project; removed again once it holds only defaults. */
+async function persistMeta(card: Card): Promise<void> {
+  const group = card.meta.group?.trim() ? card.meta.group.trim() : null;
+  card.meta.group = group;
+  const empty = !card.meta.pinned && !group && !card.meta.hidden;
+  metaCache.set(card.project.id, { ...card.meta });
+  if (empty) {
+    metaCache.delete(card.project.id);
+    await host.storage.delete(`${META_PREFIX}${card.project.id}`).catch(() => {});
+  } else {
+    await host.storage
+      .set(`${META_PREFIX}${card.project.id}`, { pinned: card.meta.pinned ?? false, group, hidden: card.meta.hidden ?? false })
+      .catch(() => {});
+  }
+}
+
+async function saveGroup(card: Card): Promise<void> {
+  card.meta.group = card.groupDraft.trim() || null;
+  card.editingGroup = false;
+  await persistMeta(card);
+  render();
+}
 
 async function runAction(card: Card, act: string): Promise<void> {
   switch (act) {
@@ -948,8 +1502,12 @@ async function runAction(card: Card, act: string): Promise<void> {
       state.activity = null;
       state.activityState = "idle";
       state.activityFor = null;
+      state.git = null;
+      state.gitState = "idle";
+      state.gitFor = null;
       render();
       void loadActivity(card, 30);
+      void loadGit(card);
       return;
     case "back":
       state.view = "board";
@@ -986,6 +1544,7 @@ async function runAction(card: Card, act: string): Promise<void> {
       return;
     case "edit-site":
       card.editingSite = true;
+      card.editingGroup = false;
       card.siteDraft = card.manualSite ?? "";
       render();
       return;
@@ -995,6 +1554,38 @@ async function runAction(card: Card, act: string): Promise<void> {
       return;
     case "save-site":
       return saveSite(card);
+    case "pin":
+      card.meta.pinned = !card.meta.pinned;
+      await persistMeta(card);
+      render();
+      return;
+    case "hide":
+      card.meta.hidden = true;
+      await persistMeta(card);
+      render();
+      return;
+    case "unhide":
+      card.meta.hidden = false;
+      await persistMeta(card);
+      render();
+      return;
+    case "edit-group":
+      card.editingGroup = true;
+      card.editingSite = false;
+      card.groupDraft = card.meta.group ?? "";
+      render();
+      return;
+    case "cancel-group":
+      card.editingGroup = false;
+      render();
+      return;
+    case "save-group":
+      return saveGroup(card);
+    case "check-now":
+      toast("info", "Re-checking deployments…");
+      await loadVitals(card, true);
+      render();
+      return;
     case "rewrite": {
       card.summary = null;
       card.summaryState = "idle";
@@ -1215,13 +1806,25 @@ sortEl.addEventListener("change", () => {
 
 aiEl.addEventListener("change", () => {
   state.ai = aiEl.checked;
-  void host.storage.set(SETTINGS_KEY, { ai: state.ai }).catch(() => {});
+  void saveSettings();
   if (state.ai) {
     for (const card of state.cards) maybeSummarize(card);
   } else {
     summaryQueue.length = 0;
   }
   scheduleRender();
+});
+
+groupEl.addEventListener("click", () => {
+  state.groupOn = !state.groupOn;
+  void saveSettings();
+  render();
+});
+
+hiddenEl.addEventListener("click", () => {
+  state.showHidden = !state.showHidden;
+  void saveSettings();
+  render();
 });
 
 refreshEl.addEventListener("click", () => {

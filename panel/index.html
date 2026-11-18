@@ -39,6 +39,7 @@
         z-index: 5;
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 8px;
         padding: 10px 12px;
         background: var(--oc-bg, #101014);
@@ -619,6 +620,168 @@
         align-items: center;
         flex-wrap: wrap;
       }
+
+      /* ------------------------------------------------------ sections */
+      .section {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .section-head {
+        align-self: flex-start;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: none;
+        border: 0;
+        padding: 0;
+        cursor: pointer;
+        color: var(--oc-muted, #8b8b96);
+        font-size: 12px;
+      }
+      .section-head b {
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+      .section-head:hover {
+        color: var(--oc-fg, #e8e8ea);
+      }
+      .section-body {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+        align-content: start;
+      }
+      body[data-surface="panel"] .section-body {
+        grid-template-columns: 1fr;
+      }
+
+      /* ----------------------------------------------------------- pin */
+      .pin {
+        background: none;
+        border: 0;
+        padding: 0 2px;
+        cursor: pointer;
+        color: var(--oc-muted, #8b8b96);
+        font-size: 14px;
+        line-height: 1;
+      }
+      .pin:hover {
+        color: var(--oc-fg, #e8e8ea);
+      }
+      .pin[data-on="true"] {
+        color: var(--oc-warning-text, #e0a94f);
+      }
+      .card.dim {
+        opacity: 0.55;
+      }
+
+      /* -------------------------------------------------------- heatmap */
+      .heat-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .heat-months {
+        display: grid;
+        gap: 3px;
+        font-size: 10px;
+        color: var(--oc-muted, #8b8b96);
+      }
+      .heat-months span {
+        overflow: hidden;
+        white-space: nowrap;
+      }
+      .heat {
+        display: grid;
+        grid-template-rows: repeat(7, 11px);
+        gap: 3px;
+      }
+      .heat-cell {
+        border-radius: 2px;
+        min-width: 0;
+      }
+      .heat-cell[data-level="empty"] {
+        background: transparent;
+      }
+      .heat-cell[data-level="0"] {
+        background: var(--oc-muted-surface, #1e1e26);
+      }
+      .heat-cell[data-level="1"] {
+        background: color-mix(in srgb, var(--oc-primary, #6c8cff) 22%, transparent);
+      }
+      .heat-cell[data-level="2"] {
+        background: color-mix(in srgb, var(--oc-primary, #6c8cff) 45%, transparent);
+      }
+      .heat-cell[data-level="3"] {
+        background: color-mix(in srgb, var(--oc-primary, #6c8cff) 70%, transparent);
+      }
+      .heat-cell[data-level="4"] {
+        background: var(--oc-primary, #6c8cff);
+      }
+
+      /* ----------------------------------------------------- deployments */
+      .dep-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 8px;
+        padding: 8px 0;
+        border-top: 1px solid var(--oc-border, #2a2a31);
+      }
+      .dep-host {
+        background: none;
+        border: 0;
+        padding: 0;
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 12.5px;
+      }
+      .dep-host:hover {
+        color: var(--oc-primary-text, #9fb4ff);
+      }
+      .dep-facts {
+        font-size: 11px;
+      }
+      .dep-down {
+        font-size: 11px;
+        color: var(--oc-error-text, #f08a85);
+      }
+      .probe-dots {
+        display: flex;
+        gap: 3px;
+        align-items: center;
+        flex-basis: 100%;
+      }
+      .probe-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--oc-muted, #8b8b96);
+      }
+      .probe-dot[data-live="up"] {
+        background: var(--oc-success, #3fa06b);
+      }
+      .probe-dot[data-live="down"] {
+        background: var(--oc-error, #d4544e);
+      }
+      .cert {
+        font-size: 10px;
+        padding: 0 5px;
+        border-radius: 4px;
+        border: 1px solid transparent;
+      }
+      .cert.warn {
+        color: var(--oc-warning-text, #e0a94f);
+        border-color: color-mix(in srgb, var(--oc-warning, #b98226) 50%, transparent);
+      }
+      .cert.fail {
+        color: var(--oc-error-text, #f08a85);
+        border-color: color-mix(in srgb, var(--oc-error, #d4544e) 50%, transparent);
+      }
       .empty {
         grid-column: 1 / -1;
         text-align: center;
@@ -642,6 +805,8 @@
         <option value="name">Name</option>
         <option value="size">Size</option>
       </select>
+      <button class="toggle" id="group" aria-pressed="true" title="Group the board into sections">Group: On</button>
+      <button class="icon-btn" id="hidden-toggle" title="Show hidden projects">Hidden (0)</button>
       <label class="toggle" title="Write an AI blurb for each project">
         <input type="checkbox" id="ai" /> AI
       </label>
