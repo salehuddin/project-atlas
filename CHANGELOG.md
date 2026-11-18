@@ -17,9 +17,6 @@
   "down since", with a **Check now** button. Down or soon-expiring deployments
   boost the "Needs me" sort. History is only "checks observed while Atlas is open",
   capped at 40 entries per URL.
-
-## Unreleased
-
 - README screenshots, generated from invented projects by a demo harness (`demo/`) that runs
   the real panel against a mock host. `npm run screenshots` regenerates them.
 
