@@ -1030,24 +1030,46 @@ function cliCandidates(): string[] {
   return list;
 }
 
-async function runStats(dir: string, days: number): Promise<any | null> {
-  for (const bin of cliCandidates()) {
-    const stdout = await new Promise<string | null>((resolve) => {
-      execFile(
-        bin,
-        ["stats", "--json", "--full", "--days", String(days), "--project", "."],
-        { cwd: dir, timeout: 25_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
-        (error, out) => resolve(error ? null : out.toString()),
-      );
-    });
-    if (!stdout) continue;
-    try {
-      return JSON.parse(stdout);
-    } catch {
-      continue;
-    }
+/** At most two `opencode stats` processes at once; the rest queue. */
+let statsRunning = 0;
+const statsQueue: Array<() => void> = [];
+
+async function withStatsSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (statsRunning >= 2) await new Promise<void>((resolve) => statsQueue.push(resolve));
+  statsRunning += 1;
+  try {
+    return await fn();
+  } finally {
+    statsRunning -= 1;
+    const next = statsQueue.shift();
+    if (next) next();
   }
-  return null;
+}
+
+async function runStatsRaw(dir: string, days: number, extra: string[]): Promise<any | null> {
+  return withStatsSlot(async () => {
+    for (const bin of cliCandidates()) {
+      const stdout = await new Promise<string | null>((resolve) => {
+        execFile(
+          bin,
+          ["stats", "--json", "--full", ...extra, "--days", String(days), "--project", "."],
+          { cwd: dir, timeout: 25_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+          (error, out) => resolve(error ? null : out.toString()),
+        );
+      });
+      if (!stdout) continue;
+      try {
+        return JSON.parse(stdout);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  });
+}
+
+async function runStats(dir: string, days: number): Promise<any | null> {
+  return runStatsRaw(dir, days, []);
 }
 
 async function activityFor(dir: string, days: number): Promise<any> {
@@ -1259,6 +1281,343 @@ async function gitHistory(dir: string, force: boolean): Promise<GitData> {
   return data;
 }
 
+/* ---------------------------------------------------------------- inbox */
+
+const INBOX_TTL_MS = 60 * 1000;
+const INBOX_MAX = 1000;
+
+type InboxItem = {
+  projectId: string;
+  kind: "todo" | "step";
+  text: string;
+  plan: string | null;
+  planFile: string | null;
+  createdAt: number | null;
+};
+
+let inboxCache: { at: number; data: unknown } | null = null;
+
+/**
+ * Open work across every known project: open todos from each context.json
+ * plus the unchecked `- [ ]` lines of each plan's markdown. Malformed files
+ * are skipped, never thrown; capped at 1000 items with a truncated flag.
+ */
+async function inboxPayload(): Promise<{
+  available: boolean;
+  items: InboxItem[];
+  counts: { todos: number; steps: number };
+  truncated: boolean;
+}> {
+  if (inboxCache && Date.now() - inboxCache.at < INBOX_TTL_MS) return inboxCache.data as any;
+
+  const items: InboxItem[] = [];
+  let available = false;
+  const projects = await readLocalProjects();
+
+  for (const project of projects) {
+    if (!/^[A-Za-z0-9_-]{3,200}$/.test(project.id)) continue;
+    const base = path.join(PROJECTS_DIR, project.id);
+    const context = await readJson(path.join(base, "context.json"));
+    if (!context) continue;
+    available = true;
+
+    const todos: any[] = Array.isArray(context.todos) ? context.todos : [];
+    for (const todo of todos) {
+      if (todo?.completed || typeof todo?.text !== "string" || !todo.text.trim()) continue;
+      items.push({
+        projectId: project.id,
+        kind: "todo",
+        text: String(todo.text).slice(0, 220),
+        plan: null,
+        planFile: null,
+        createdAt: typeof todo.createdAt === "number" ? todo.createdAt : null,
+      });
+      if (items.length >= INBOX_MAX) break;
+    }
+    if (items.length >= INBOX_MAX) break;
+
+    const plans: any[] = Array.isArray(context.plans) ? context.plans : [];
+    for (const plan of plans.slice(0, 60)) {
+      const file = typeof plan?.file === "string" ? plan.file : null;
+      if (!file) continue;
+      const planPath = path.join(base, "plans", path.basename(file));
+      const text = (await readText(planPath, 300_000)) ?? "";
+      const stat = await fsp.stat(planPath).catch(() => null);
+      const createdAt =
+        typeof plan?.createdAt === "number" ? plan.createdAt : (stat?.mtimeMs ? Math.round(stat.mtimeMs) : null);
+      const title = typeof plan?.title === "string" && plan.title ? plan.title : file;
+      for (const match of text.matchAll(/^[ \t]*[-*][ \t]+\[ \][ \t]*(.+?)[ \t]*$/gm)) {
+        const step = (match[1] ?? "").replace(/^[#>*\s-]+/, "").trim();
+        if (!step) continue;
+        items.push({
+          projectId: project.id,
+          kind: "step",
+          text: step.slice(0, 220),
+          plan: title.slice(0, 160),
+          planFile: path.basename(file),
+          createdAt,
+        });
+        if (items.length >= INBOX_MAX) break;
+      }
+      if (items.length >= INBOX_MAX) break;
+    }
+    if (items.length >= INBOX_MAX) break;
+  }
+
+  const truncated = items.length >= INBOX_MAX;
+  const data = {
+    available,
+    items: truncated ? items.slice(0, INBOX_MAX) : items,
+    counts: {
+      todos: items.filter((item) => item.kind === "todo").length,
+      steps: items.filter((item) => item.kind === "step").length,
+    },
+    truncated,
+  };
+  inboxCache = { at: Date.now(), data };
+  return data;
+}
+
+/* ---------------------------------------------------------------- spend */
+
+const SPEND_TTL_MS = 5 * 60 * 1000;
+const spendCache = new Map<string, { at: number; data: unknown }>();
+
+function num(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+type SpendModel = { name: string; tokens: number; cost: number; share: number };
+
+/**
+ * Token spend for one project from `opencode stats --cost --models`.
+ * Cost is often 0 (free or unpriced models), so tokens are the primary
+ * metric and cost is reported only when greater than 0.
+ */
+async function spendFor(dir: string, days: number): Promise<{
+  available: boolean;
+  days: number;
+  cost: number;
+  tokens: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number; total: number };
+  sessions: number;
+  models: SpendModel[];
+}> {
+  const key = `${dir}|${days}`;
+  const cached = spendCache.get(key);
+  if (cached && Date.now() - cached.at < SPEND_TTL_MS) return cached.data as any;
+
+  const raw = await runStatsRaw(dir, days, ["--cost", "--models"]);
+  if (!raw) {
+    const data = {
+      available: false,
+      days,
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      sessions: 0,
+      models: [],
+    };
+    spendCache.set(key, { at: Date.now(), data });
+    return data;
+  }
+
+  const bucket = (raw.tokens ?? {}) as Record<string, any>;
+  const input = num(bucket.input);
+  const output = num(bucket.output);
+  const reasoning = num(bucket.reasoning);
+  const cacheRead = num(bucket.cache?.read ?? bucket.cacheRead);
+  const cacheWrite = num(bucket.cache?.write ?? bucket.cacheWrite);
+  const total = input + output + reasoning + cacheRead + cacheWrite;
+
+  const parsed: SpendModel[] = (Array.isArray(raw.models) ? raw.models : [])
+    .map((entry: any) => {
+      const tokens =
+        typeof entry?.tokens === "number"
+          ? num(entry.tokens)
+          : num(entry?.input) + num(entry?.output) + num(entry?.reasoning) + num(entry?.cache?.read) + num(entry?.cache?.write) + num(entry?.total);
+      return {
+        name: String(entry?.model ?? entry?.name ?? entry?.id ?? "unknown").slice(0, 80),
+        tokens,
+        cost: num(entry?.cost),
+        share: 0,
+      };
+    })
+    .filter((model: SpendModel) => model.tokens > 0 || model.cost > 0)
+    .sort((a: SpendModel, b: SpendModel) => b.tokens - a.tokens);
+
+  const modelTotal = parsed.reduce((sum, model) => sum + model.tokens, 0) || total;
+  for (const model of parsed) model.share = modelTotal > 0 ? model.tokens / modelTotal : 0;
+
+  const top = parsed.slice(0, 8);
+  if (parsed.length > 8) {
+    const rest = parsed.slice(8);
+    const restTokens = rest.reduce((sum, model) => sum + model.tokens, 0);
+    top.push({
+      name: "other",
+      tokens: restTokens,
+      cost: rest.reduce((sum, model) => sum + model.cost, 0),
+      share: modelTotal > 0 ? restTokens / modelTotal : 0,
+    });
+  }
+
+  const data = {
+    available: true,
+    days,
+    cost: num(raw.cost),
+    tokens: { input, output, reasoning, cacheRead, cacheWrite, total },
+    sessions: num(raw.sessions),
+    models: top,
+  };
+  spendCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+/* ----------------------------------------------------------------- disk */
+
+const DISK_TTL_MS = 12 * 60 * 60 * 1000;
+const diskCache = new Map<string, { at: number; data: unknown }>();
+
+const DISK_CATEGORIES = [
+  { id: "node_modules", label: "node_modules", dirs: ["node_modules"], reclaimable: true },
+  { id: "vendor", label: "vendor", dirs: ["vendor"], reclaimable: true },
+  { id: "git", label: ".git", dirs: [".git"], reclaimable: false },
+  {
+    id: "build",
+    label: "Build output",
+    dirs: ["dist", "build", ".next", ".nuxt", ".svelte-kit", ".turbo", "target", "out"],
+    reclaimable: true,
+  },
+  { id: "caches", label: "Caches", dirs: [".cache", "__pycache__", ".pytest_cache", ".gradle"], reclaimable: true },
+  { id: "venvs", label: "Virtualenvs", dirs: [".venv", "venv"], reclaimable: true },
+  { id: "source", label: "Source & assets", dirs: [] as string[], reclaimable: false },
+];
+
+const DISK_DIR_TO_CATEGORY = new Map<string, string>();
+for (const category of DISK_CATEGORIES) {
+  for (const dir of category.dirs) DISK_DIR_TO_CATEGORY.set(dir, category.id);
+}
+
+type DiskCategory = { id: string; label: string; bytes: number; files: number; reclaimable: boolean; paths: string[] };
+
+/**
+ * One budgeted walk that attributes every file to the category of its
+ * shallowest matching directory segment (so nested node_modules counts
+ * once), plus the 8 largest immediate children of the project root.
+ * Same 12 s / 300k-file budget as /size; strictly read-only.
+ */
+async function diskFor(dir: string, force: boolean): Promise<unknown> {
+  const cached = diskCache.get(dir);
+  if (!force && cached && Date.now() - cached.at < DISK_TTL_MS) return cached.data;
+
+  const isDir = await fsp
+    .stat(dir)
+    .then((stat) => stat.isDirectory())
+    .catch(() => false);
+  if (!isDir) return { available: false, total: 0, files: 0, truncated: false, categories: [], children: [], reclaimableBytes: 0 };
+
+  const started = Date.now();
+  let truncated = false;
+  let fileCount = 0;
+  const buckets = new Map<string, { bytes: number; files: number; top: Array<{ rel: string; bytes: number }> }>();
+  for (const category of DISK_CATEGORIES) buckets.set(category.id, { bytes: 0, files: 0, top: [] });
+  const topBytes = new Map<string, number>();
+  const topIsDir = new Set<string>();
+
+  const pending: string[] = [dir];
+  while (pending.length) {
+    if (Date.now() - started > MEASURE_BUDGET_MS) {
+      truncated = true;
+      break;
+    }
+    const current = pending.pop();
+    if (!current) break;
+    let entries;
+    try {
+      entries = await fsp.readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const filePaths: string[] = [];
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        pending.push(full);
+        if (current === dir) {
+          topIsDir.add(entry.name);
+          if (!topBytes.has(entry.name)) topBytes.set(entry.name, 0);
+        }
+      } else if (entry.isFile()) {
+        filePaths.push(full);
+      }
+    }
+    for (let index = 0; index < filePaths.length; index += 64) {
+      const batch = filePaths.slice(index, index + 64);
+      const stats = await Promise.all(batch.map((file) => fsp.stat(file).catch(() => null)));
+      for (let slot = 0; slot < batch.length; slot += 1) {
+        const stat = stats[slot];
+        if (!stat?.isFile()) continue;
+        fileCount += 1;
+        const rel = path.relative(dir, batch[slot]);
+        const segments = rel.split(path.sep);
+        let categoryId = "source";
+        for (const segment of segments) {
+          const match = DISK_DIR_TO_CATEGORY.get(segment);
+          if (match) {
+            categoryId = match;
+            break;
+          }
+        }
+        const bucket = buckets.get(categoryId);
+        if (bucket) {
+          bucket.bytes += stat.size;
+          bucket.files += 1;
+          bucket.top.push({ rel, bytes: stat.size });
+          if (bucket.top.length > 40) {
+            bucket.top.sort((a, b) => b.bytes - a.bytes);
+            bucket.top.length = 5;
+          }
+        }
+        const top = segments[0];
+        if (top) topBytes.set(top, (topBytes.get(top) ?? 0) + stat.size);
+      }
+    }
+    if (fileCount > MEASURE_MAX_FILES) {
+      truncated = true;
+      break;
+    }
+  }
+
+  let total = 0;
+  const categories: DiskCategory[] = DISK_CATEGORIES.map((category) => {
+    const bucket = buckets.get(category.id);
+    const bytes = bucket?.bytes ?? 0;
+    total += bytes;
+    const top = (bucket?.top ?? []).sort((a, b) => b.bytes - a.bytes).slice(0, 5);
+    return {
+      id: category.id,
+      label: category.label,
+      bytes,
+      files: bucket?.files ?? 0,
+      reclaimable: category.reclaimable,
+      paths: top.map((entry) => entry.rel),
+    };
+  }).filter((category) => category.files > 0 || category.id === "source");
+
+  const children = [...topBytes.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([name, bytes]) => ({ name, bytes, isDir: topIsDir.has(name) }));
+
+  const reclaimableBytes = categories
+    .filter((category) => category.reclaimable)
+    .reduce((sum, category) => sum + category.bytes, 0);
+
+  const data = { available: true, total, files: fileCount, truncated, categories, children, reclaimableBytes };
+  diskCache.set(dir, { at: Date.now(), data });
+  return data;
+}
+
 function reveal(dir: string): boolean {
   const [bin, args] =
     process.platform === "win32"
@@ -1346,11 +1705,43 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, await gitHistory(dir, url.searchParams.get("force") === "1"));
     }
 
+    if (req.method === "GET" && url.pathname === "/inbox") {
+      return json(res, 200, await inboxPayload());
+    }
+
+    if (req.method === "GET" && url.pathname === "/spend") {
+      const dir = safeDir(url.searchParams.get("directory"));
+      if (!dir) return json(res, 400, { error: "bad directory" });
+      const days = Math.min(90, Math.max(1, Number(url.searchParams.get("days")) || 30));
+      return json(res, 200, await spendFor(dir, days));
+    }
+
+    if (req.method === "GET" && url.pathname === "/disk") {
+      const dir = safeDir(url.searchParams.get("directory"));
+      if (!dir) return json(res, 400, { error: "bad directory" });
+      return json(res, 200, await diskFor(dir, url.searchParams.get("force") === "1"));
+    }
+
     if (req.method === "POST" && url.pathname === "/reveal") {
       const payload = JSON.parse((await readBody(req)) || "{}");
       const dir = safeDir(payload.directory);
       if (!dir) return json(res, 400, { error: "bad directory" });
-      return json(res, 200, { opened: reveal(dir) });
+      let target = dir;
+      if (payload.path != null) {
+        // Only paths inside the project directory: no absolute paths, no
+        // `..` escapes, no sibling-prefix tricks like `<project>-evil`.
+        if (typeof payload.path !== "string" || !payload.path || payload.path.includes("\u0000")) {
+          return json(res, 400, { error: "bad path" });
+        }
+        if (path.isAbsolute(payload.path)) return json(res, 400, { error: "bad path" });
+        const resolved = path.normalize(path.join(dir, payload.path));
+        if (resolved !== dir && !resolved.startsWith(dir + path.sep)) {
+          return json(res, 400, { error: "bad path" });
+        }
+        if (!(await exists(resolved))) return json(res, 400, { error: "not found" });
+        target = resolved;
+      }
+      return json(res, 200, { opened: reveal(target) });
     }
 
     if (req.method === "POST" && url.pathname === "/refresh") {

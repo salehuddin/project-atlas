@@ -806,24 +806,42 @@ function cliCandidates() {
   list.push(import_node_path.default.join(dir, "opencode-cli", "opencode.exe"));
   return list;
 }
-async function runStats(dir, days) {
-  for (const bin of cliCandidates()) {
-    const stdout = await new Promise((resolve) => {
-      (0, import_node_child_process.execFile)(
-        bin,
-        ["stats", "--json", "--full", "--days", String(days), "--project", "."],
-        { cwd: dir, timeout: 25e3, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
-        (error, out) => resolve(error ? null : out.toString())
-      );
-    });
-    if (!stdout) continue;
-    try {
-      return JSON.parse(stdout);
-    } catch {
-      continue;
-    }
+var statsRunning = 0;
+var statsQueue = [];
+async function withStatsSlot(fn) {
+  if (statsRunning >= 2) await new Promise((resolve) => statsQueue.push(resolve));
+  statsRunning += 1;
+  try {
+    return await fn();
+  } finally {
+    statsRunning -= 1;
+    const next = statsQueue.shift();
+    if (next) next();
   }
-  return null;
+}
+async function runStatsRaw(dir, days, extra) {
+  return withStatsSlot(async () => {
+    for (const bin of cliCandidates()) {
+      const stdout = await new Promise((resolve) => {
+        (0, import_node_child_process.execFile)(
+          bin,
+          ["stats", "--json", "--full", ...extra, "--days", String(days), "--project", "."],
+          { cwd: dir, timeout: 25e3, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+          (error, out) => resolve(error ? null : out.toString())
+        );
+      });
+      if (!stdout) continue;
+      try {
+        return JSON.parse(stdout);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  });
+}
+async function runStats(dir, days) {
+  return runStatsRaw(dir, days, []);
 }
 async function activityFor(dir, days) {
   const key = `${dir}|${days}`;
@@ -1000,6 +1018,253 @@ async function gitHistory(dir, force) {
   gitCache.set(dir, { at: Date.now(), data });
   return data;
 }
+var INBOX_TTL_MS = 60 * 1e3;
+var INBOX_MAX = 1e3;
+var inboxCache = null;
+async function inboxPayload() {
+  if (inboxCache && Date.now() - inboxCache.at < INBOX_TTL_MS) return inboxCache.data;
+  const items = [];
+  let available = false;
+  const projects = await readLocalProjects();
+  for (const project of projects) {
+    if (!/^[A-Za-z0-9_-]{3,200}$/.test(project.id)) continue;
+    const base = import_node_path.default.join(PROJECTS_DIR, project.id);
+    const context = await readJson(import_node_path.default.join(base, "context.json"));
+    if (!context) continue;
+    available = true;
+    const todos = Array.isArray(context.todos) ? context.todos : [];
+    for (const todo of todos) {
+      if (todo?.completed || typeof todo?.text !== "string" || !todo.text.trim()) continue;
+      items.push({
+        projectId: project.id,
+        kind: "todo",
+        text: String(todo.text).slice(0, 220),
+        plan: null,
+        planFile: null,
+        createdAt: typeof todo.createdAt === "number" ? todo.createdAt : null
+      });
+      if (items.length >= INBOX_MAX) break;
+    }
+    if (items.length >= INBOX_MAX) break;
+    const plans = Array.isArray(context.plans) ? context.plans : [];
+    for (const plan of plans.slice(0, 60)) {
+      const file = typeof plan?.file === "string" ? plan.file : null;
+      if (!file) continue;
+      const planPath = import_node_path.default.join(base, "plans", import_node_path.default.basename(file));
+      const text = await readText(planPath, 3e5) ?? "";
+      const stat = await import_node_fs.promises.stat(planPath).catch(() => null);
+      const createdAt = typeof plan?.createdAt === "number" ? plan.createdAt : stat?.mtimeMs ? Math.round(stat.mtimeMs) : null;
+      const title = typeof plan?.title === "string" && plan.title ? plan.title : file;
+      for (const match of text.matchAll(/^[ \t]*[-*][ \t]+\[ \][ \t]*(.+?)[ \t]*$/gm)) {
+        const step = (match[1] ?? "").replace(/^[#>*\s-]+/, "").trim();
+        if (!step) continue;
+        items.push({
+          projectId: project.id,
+          kind: "step",
+          text: step.slice(0, 220),
+          plan: title.slice(0, 160),
+          planFile: import_node_path.default.basename(file),
+          createdAt
+        });
+        if (items.length >= INBOX_MAX) break;
+      }
+      if (items.length >= INBOX_MAX) break;
+    }
+    if (items.length >= INBOX_MAX) break;
+  }
+  const truncated = items.length >= INBOX_MAX;
+  const data = {
+    available,
+    items: truncated ? items.slice(0, INBOX_MAX) : items,
+    counts: {
+      todos: items.filter((item) => item.kind === "todo").length,
+      steps: items.filter((item) => item.kind === "step").length
+    },
+    truncated
+  };
+  inboxCache = { at: Date.now(), data };
+  return data;
+}
+var SPEND_TTL_MS = 5 * 60 * 1e3;
+var spendCache = /* @__PURE__ */ new Map();
+function num(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+async function spendFor(dir, days) {
+  const key = `${dir}|${days}`;
+  const cached = spendCache.get(key);
+  if (cached && Date.now() - cached.at < SPEND_TTL_MS) return cached.data;
+  const raw = await runStatsRaw(dir, days, ["--cost", "--models"]);
+  if (!raw) {
+    const data2 = {
+      available: false,
+      days,
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      sessions: 0,
+      models: []
+    };
+    spendCache.set(key, { at: Date.now(), data: data2 });
+    return data2;
+  }
+  const bucket = raw.tokens ?? {};
+  const input = num(bucket.input);
+  const output = num(bucket.output);
+  const reasoning = num(bucket.reasoning);
+  const cacheRead = num(bucket.cache?.read ?? bucket.cacheRead);
+  const cacheWrite = num(bucket.cache?.write ?? bucket.cacheWrite);
+  const total = input + output + reasoning + cacheRead + cacheWrite;
+  const parsed = (Array.isArray(raw.models) ? raw.models : []).map((entry) => {
+    const tokens = typeof entry?.tokens === "number" ? num(entry.tokens) : num(entry?.input) + num(entry?.output) + num(entry?.reasoning) + num(entry?.cache?.read) + num(entry?.cache?.write) + num(entry?.total);
+    return {
+      name: String(entry?.model ?? entry?.name ?? entry?.id ?? "unknown").slice(0, 80),
+      tokens,
+      cost: num(entry?.cost),
+      share: 0
+    };
+  }).filter((model) => model.tokens > 0 || model.cost > 0).sort((a, b) => b.tokens - a.tokens);
+  const modelTotal = parsed.reduce((sum, model) => sum + model.tokens, 0) || total;
+  for (const model of parsed) model.share = modelTotal > 0 ? model.tokens / modelTotal : 0;
+  const top = parsed.slice(0, 8);
+  if (parsed.length > 8) {
+    const rest = parsed.slice(8);
+    const restTokens = rest.reduce((sum, model) => sum + model.tokens, 0);
+    top.push({
+      name: "other",
+      tokens: restTokens,
+      cost: rest.reduce((sum, model) => sum + model.cost, 0),
+      share: modelTotal > 0 ? restTokens / modelTotal : 0
+    });
+  }
+  const data = {
+    available: true,
+    days,
+    cost: num(raw.cost),
+    tokens: { input, output, reasoning, cacheRead, cacheWrite, total },
+    sessions: num(raw.sessions),
+    models: top
+  };
+  spendCache.set(key, { at: Date.now(), data });
+  return data;
+}
+var DISK_TTL_MS = 12 * 60 * 60 * 1e3;
+var diskCache = /* @__PURE__ */ new Map();
+var DISK_CATEGORIES = [
+  { id: "node_modules", label: "node_modules", dirs: ["node_modules"], reclaimable: true },
+  { id: "vendor", label: "vendor", dirs: ["vendor"], reclaimable: true },
+  { id: "git", label: ".git", dirs: [".git"], reclaimable: false },
+  {
+    id: "build",
+    label: "Build output",
+    dirs: ["dist", "build", ".next", ".nuxt", ".svelte-kit", ".turbo", "target", "out"],
+    reclaimable: true
+  },
+  { id: "caches", label: "Caches", dirs: [".cache", "__pycache__", ".pytest_cache", ".gradle"], reclaimable: true },
+  { id: "venvs", label: "Virtualenvs", dirs: [".venv", "venv"], reclaimable: true },
+  { id: "source", label: "Source & assets", dirs: [], reclaimable: false }
+];
+var DISK_DIR_TO_CATEGORY = /* @__PURE__ */ new Map();
+for (const category of DISK_CATEGORIES) {
+  for (const dir of category.dirs) DISK_DIR_TO_CATEGORY.set(dir, category.id);
+}
+async function diskFor(dir, force) {
+  const cached = diskCache.get(dir);
+  if (!force && cached && Date.now() - cached.at < DISK_TTL_MS) return cached.data;
+  const isDir = await import_node_fs.promises.stat(dir).then((stat) => stat.isDirectory()).catch(() => false);
+  if (!isDir) return { available: false, total: 0, files: 0, truncated: false, categories: [], children: [], reclaimableBytes: 0 };
+  const started = Date.now();
+  let truncated = false;
+  let fileCount = 0;
+  const buckets = /* @__PURE__ */ new Map();
+  for (const category of DISK_CATEGORIES) buckets.set(category.id, { bytes: 0, files: 0, top: [] });
+  const topBytes = /* @__PURE__ */ new Map();
+  const topIsDir = /* @__PURE__ */ new Set();
+  const pending = [dir];
+  while (pending.length) {
+    if (Date.now() - started > MEASURE_BUDGET_MS) {
+      truncated = true;
+      break;
+    }
+    const current = pending.pop();
+    if (!current) break;
+    let entries;
+    try {
+      entries = await import_node_fs.promises.readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const filePaths = [];
+    for (const entry of entries) {
+      const full = import_node_path.default.join(current, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        pending.push(full);
+        if (current === dir) {
+          topIsDir.add(entry.name);
+          if (!topBytes.has(entry.name)) topBytes.set(entry.name, 0);
+        }
+      } else if (entry.isFile()) {
+        filePaths.push(full);
+      }
+    }
+    for (let index = 0; index < filePaths.length; index += 64) {
+      const batch = filePaths.slice(index, index + 64);
+      const stats = await Promise.all(batch.map((file) => import_node_fs.promises.stat(file).catch(() => null)));
+      for (let slot = 0; slot < batch.length; slot += 1) {
+        const stat = stats[slot];
+        if (!stat?.isFile()) continue;
+        fileCount += 1;
+        const rel = import_node_path.default.relative(dir, batch[slot]);
+        const segments = rel.split(import_node_path.default.sep);
+        let categoryId = "source";
+        for (const segment of segments) {
+          const match = DISK_DIR_TO_CATEGORY.get(segment);
+          if (match) {
+            categoryId = match;
+            break;
+          }
+        }
+        const bucket = buckets.get(categoryId);
+        if (bucket) {
+          bucket.bytes += stat.size;
+          bucket.files += 1;
+          bucket.top.push({ rel, bytes: stat.size });
+          if (bucket.top.length > 40) {
+            bucket.top.sort((a, b) => b.bytes - a.bytes);
+            bucket.top.length = 5;
+          }
+        }
+        const top = segments[0];
+        if (top) topBytes.set(top, (topBytes.get(top) ?? 0) + stat.size);
+      }
+    }
+    if (fileCount > MEASURE_MAX_FILES) {
+      truncated = true;
+      break;
+    }
+  }
+  let total = 0;
+  const categories = DISK_CATEGORIES.map((category) => {
+    const bucket = buckets.get(category.id);
+    const bytes = bucket?.bytes ?? 0;
+    total += bytes;
+    const top = (bucket?.top ?? []).sort((a, b) => b.bytes - a.bytes).slice(0, 5);
+    return {
+      id: category.id,
+      label: category.label,
+      bytes,
+      files: bucket?.files ?? 0,
+      reclaimable: category.reclaimable,
+      paths: top.map((entry) => entry.rel)
+    };
+  }).filter((category) => category.files > 0 || category.id === "source");
+  const children = [...topBytes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, bytes]) => ({ name, bytes, isDir: topIsDir.has(name) }));
+  const reclaimableBytes = categories.filter((category) => category.reclaimable).reduce((sum, category) => sum + category.bytes, 0);
+  const data = { available: true, total, files: fileCount, truncated, categories, children, reclaimableBytes };
+  diskCache.set(dir, { at: Date.now(), data });
+  return data;
+}
 function reveal(dir) {
   const [bin, args] = process.platform === "win32" ? ["explorer.exe", [dir]] : process.platform === "darwin" ? ["open", [dir]] : ["xdg-open", [dir]];
   try {
@@ -1070,11 +1335,38 @@ var server = import_node_http.default.createServer(async (req, res) => {
       if (!dir) return json(res, 400, { error: "bad directory" });
       return json(res, 200, await gitHistory(dir, url.searchParams.get("force") === "1"));
     }
+    if (req.method === "GET" && url.pathname === "/inbox") {
+      return json(res, 200, await inboxPayload());
+    }
+    if (req.method === "GET" && url.pathname === "/spend") {
+      const dir = safeDir(url.searchParams.get("directory"));
+      if (!dir) return json(res, 400, { error: "bad directory" });
+      const days = Math.min(90, Math.max(1, Number(url.searchParams.get("days")) || 30));
+      return json(res, 200, await spendFor(dir, days));
+    }
+    if (req.method === "GET" && url.pathname === "/disk") {
+      const dir = safeDir(url.searchParams.get("directory"));
+      if (!dir) return json(res, 400, { error: "bad directory" });
+      return json(res, 200, await diskFor(dir, url.searchParams.get("force") === "1"));
+    }
     if (req.method === "POST" && url.pathname === "/reveal") {
       const payload = JSON.parse(await readBody(req) || "{}");
       const dir = safeDir(payload.directory);
       if (!dir) return json(res, 400, { error: "bad directory" });
-      return json(res, 200, { opened: reveal(dir) });
+      let target = dir;
+      if (payload.path != null) {
+        if (typeof payload.path !== "string" || !payload.path || payload.path.includes("\0")) {
+          return json(res, 400, { error: "bad path" });
+        }
+        if (import_node_path.default.isAbsolute(payload.path)) return json(res, 400, { error: "bad path" });
+        const resolved = import_node_path.default.normalize(import_node_path.default.join(dir, payload.path));
+        if (resolved !== dir && !resolved.startsWith(dir + import_node_path.default.sep)) {
+          return json(res, 400, { error: "bad path" });
+        }
+        if (!await exists(resolved)) return json(res, 400, { error: "not found" });
+        target = resolved;
+      }
+      return json(res, 200, { opened: reveal(target) });
     }
     if (req.method === "POST" && url.pathname === "/refresh") {
       const payload = JSON.parse(await readBody(req) || "{}");

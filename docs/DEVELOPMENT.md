@@ -45,12 +45,13 @@ panel/, service/       build output (committed)
 The README images never show real projects. `demo/build.mjs` bundles the unchanged
 `src/panel/main.ts`, swapping `@openchamber/sdk` and `@openchamber/sdk/ui` for
 `demo/mock-sdk.ts` and `demo/mock-ui.ts` at bundle time. The mock answers every host and
-service call from `demo/fixtures.ts`: six invented projects, pre-written blurbs, and an
-activity series from a fixed seed, so the output is the same on every run.
+service call from `demo/fixtures.ts`: six invented projects, pre-written blurbs, an
+activity series from a fixed seed, plus seeded pins, groups, probe histories, inbox items,
+spend numbers and disk breakdowns, so the output is the same on every run.
 
 `demo/screenshot.mjs` opens the result in headless Chrome or Edge over the DevTools protocol
 (Node 22+; set `CHROME_PATH` if the browser is not found), sets an exact viewport, trims each
-image to its content and writes four files at 2x. To look at it by hand, open
+image to its content and writes eight files at 2x. To look at it by hand, open
 `demo/dist/index.html` after `npm run demo:build`:
 
 | URL suffix | Shows |
@@ -58,6 +59,9 @@ image to its content and writes four files at 2x. To look at it by hand, open
 | *(none)* | full-screen board |
 | `?theme=light` | light theme |
 | `?surface=panel` | the narrow rail layout |
+| `?density=minimal` | compact cards |
+| `?view=inbox` | the cross-project inbox |
+| `?view=spend` | the Spend tab |
 | `#project=Lumen%20Bakery` | that project's page |
 
 When the panel's look changes, run `npm run screenshots` and commit the new images. Add a

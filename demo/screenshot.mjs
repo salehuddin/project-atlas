@@ -34,6 +34,9 @@ if (!browserPath) {
 
 const shots = [
   { file: "board.png", query: "", hash: "", width: 1000, height: 1040 },
+  { file: "board-minimal.png", query: "?density=minimal", hash: "", width: 1000 },
+  { file: "inbox.png", query: "?view=inbox", hash: "", width: 1100, height: 760 },
+  { file: "spend.png", query: "?view=spend", hash: "", width: 1280 },
   { file: "project.png", query: "", hash: "#project=Lumen%20Bakery", width: 1280 },
   { file: "project-alerts.png", query: "", hash: "#project=Paperkite%20Docs", width: 1280 },
   { file: "rail.png", query: "?surface=panel", hash: "", width: 440, height: 900 },

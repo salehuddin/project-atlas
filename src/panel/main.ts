@@ -142,6 +142,65 @@ type ActivityData = {
   knowledge: Knowledge;
 };
 
+type Density = "normal" | "minimal";
+
+type BoardTab = "board" | "inbox" | "spend";
+
+type InboxItem = {
+  projectId: string;
+  kind: "todo" | "step";
+  text: string;
+  plan: string | null;
+  planFile: string | null;
+  createdAt: number | null;
+};
+
+type InboxData = {
+  available: boolean;
+  items: InboxItem[];
+  counts: { todos: number; steps: number };
+  truncated: boolean;
+};
+
+type SpendTokens = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+};
+
+type SpendModel = { name: string; tokens: number; cost: number; share: number };
+
+type SpendData = {
+  available: boolean;
+  days: number;
+  cost: number;
+  tokens: SpendTokens;
+  sessions: number;
+  models: SpendModel[];
+};
+
+type DiskCategory = {
+  id: string;
+  label: string;
+  bytes: number;
+  files: number;
+  reclaimable: boolean;
+  paths: string[];
+};
+
+type DiskData = {
+  available: boolean;
+  total: number;
+  files: number;
+  truncated: boolean;
+  categories: DiskCategory[];
+  children: Array<{ name: string; bytes: number; isDir: boolean }>;
+  reclaimableBytes: number;
+};
+
 /* --------------------------------------------------------------- state */
 
 const SUMMARY_PREFIX = "atlas:v1:summary:";
@@ -150,7 +209,14 @@ const META_PREFIX = "atlas:v1:meta:";
 const PROBE_PREFIX = "atlas:v1:probes:";
 const SETTINGS_KEY = "atlas:v1:settings";
 
-type Settings = { ai: boolean; groupOn: boolean; collapsed: Record<string, boolean>; showHidden: boolean };
+type Settings = {
+  ai: boolean;
+  groupOn: boolean;
+  collapsed: Record<string, boolean>;
+  showHidden: boolean;
+  density: Density;
+  view: BoardTab;
+};
 
 const SYSTEM_PROMPT =
   "You write project blurbs. Two sentences, at most 45 words. Say what the project is, " +
@@ -166,6 +232,8 @@ const state = {
   groupOn: true,
   collapsed: {} as Record<string, boolean>,
   showHidden: false,
+  density: "normal" as Density,
+  tab: "board" as BoardTab,
   directory: null as string | null,
   surface: "panel",
   serviceDown: false,
@@ -180,7 +248,23 @@ const state = {
   git: null as GitData | null,
   gitState: "idle" as "idle" | "loading" | "ready" | "error",
   gitFor: null as string | null,
+  spend: null as SpendData | null,
+  spendState: "idle" as "idle" | "loading" | "ready" | "error",
+  spendFor: null as string | null,
+  disk: null as DiskData | null,
+  diskState: "idle" as "idle" | "loading" | "ready" | "error",
+  diskFor: null as string | null,
   probes: new Map<string, Record<string, ProbeEntry[]>>(),
+  inbox: null as InboxData | null,
+  inboxState: "idle" as "idle" | "loading" | "ready" | "error",
+  inboxKind: "all" as "all" | "todo" | "step",
+  inboxProject: "all",
+  inboxSort: "old" as "old" | "new" | "byproject",
+  inboxGroup: false,
+  inboxLimit: 150,
+  spendBoard: new Map<string, SpendData>(),
+  spendBoardState: "idle" as "idle" | "loading" | "ready",
+  spendBoardProgress: { done: 0, total: 0 },
 };
 
 const summaryCache = new Map<string, { text: string; hash: string }>();
@@ -200,6 +284,9 @@ const aiEl = document.querySelector<HTMLInputElement>("#ai")!;
 const refreshEl = document.querySelector<HTMLButtonElement>("#refresh")!;
 const groupEl = document.querySelector<HTMLButtonElement>("#group")!;
 const hiddenEl = document.querySelector<HTMLButtonElement>("#hidden-toggle")!;
+const inboxBadgeEl = document.querySelector<HTMLElement>("#inbox-badge")!;
+const tabEls = [...document.querySelectorAll<HTMLButtonElement>(".view-tab")];
+const densityEls = [...document.querySelectorAll<HTMLButtonElement>(".density-btn")];
 const noticeEl = document.querySelector<HTMLElement>("#notice")!;
 const gridEl = document.querySelector<HTMLElement>("#grid")!;
 const footerEl = document.querySelector<HTMLElement>("#footer")!;
@@ -234,12 +321,31 @@ function render(): void {
   groupEl.textContent = `Group: ${state.groupOn ? "On" : "Off"}`;
   groupEl.setAttribute("aria-pressed", String(state.groupOn));
 
+  for (const tab of tabEls) {
+    const active = tab.dataset.tab === state.tab;
+    tab.setAttribute("aria-selected", String(active));
+  }
+  for (const button of densityEls) {
+    button.setAttribute("aria-pressed", String(button.dataset.density === state.density));
+  }
+  updateInboxBadge();
+
   if (state.view === "project") {
     const card = state.cards.find((item) => item.project.id === state.viewId);
     gridEl.dataset.mode = "detail";
+    gridEl.removeAttribute("data-density");
     gridEl.replaceChildren(card ? renderDetail(card) : mutedLine("That project is no longer open."));
+  } else if (state.tab === "inbox") {
+    gridEl.dataset.mode = "board";
+    gridEl.removeAttribute("data-density");
+    gridEl.replaceChildren(...renderInboxView());
+  } else if (state.tab === "spend") {
+    gridEl.dataset.mode = "board";
+    gridEl.removeAttribute("data-density");
+    gridEl.replaceChildren(...renderSpendBoardView());
   } else {
     gridEl.dataset.mode = "board";
+    gridEl.dataset.density = state.density;
     gridEl.replaceChildren(...renderBoard());
     if (state.cards.length === 0) {
       const empty = div("empty");
@@ -251,6 +357,24 @@ function render(): void {
   }
 
   footerEl.textContent = footerText();
+}
+
+/** Badge on the Inbox tab: open items on visible projects. */
+function updateInboxBadge(): void {
+  const items = state.inbox?.items ?? [];
+  const shown = state.showHidden ? items : items.filter((item) => !findCard(item.projectId)?.meta.hidden);
+  if (!items.length) {
+    inboxBadgeEl.hidden = true;
+    inboxBadgeEl.textContent = "";
+  } else {
+    inboxBadgeEl.hidden = false;
+    inboxBadgeEl.textContent = String(shown.length > 99 ? "99+" : shown.length);
+  }
+}
+
+/** Cards the board tabs may see: hidden projects only when revealed. */
+function tabCards(): Card[] {
+  return state.showHidden ? [...state.cards] : state.cards.filter((card) => !card.meta.hidden);
 }
 
 /** Board rows: one flat pinned-first list, or Pinned / group / Ungrouped sections. */
@@ -316,13 +440,187 @@ function renderSection(title: string, cards: Card[]): HTMLElement {
   return section;
 }
 
+/* ------------------------------------------------------------ inbox view */
+
+function renderInboxView(): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
+  const filters = div("inbox-filters");
+  for (const [value, label] of [["all", "All"], ["todo", "Todos"], ["step", "Plan steps"]] as const) {
+    const button = document.createElement("button");
+    button.className = "seg-btn";
+    button.dataset.act = `inbox-kind-${value}`;
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(state.inboxKind === value));
+    filters.append(button);
+  }
+
+  const projectSelect = document.createElement("select");
+  projectSelect.className = "sort";
+  projectSelect.dataset.inboxProject = "true";
+  projectSelect.setAttribute("aria-label", "Inbox project");
+  const allOption = document.createElement("option");
+  allOption.value = "all";
+  allOption.textContent = "All projects";
+  projectSelect.append(allOption);
+  for (const card of tabCards()) {
+    const option = document.createElement("option");
+    option.value = card.project.id;
+    option.textContent = card.project.name;
+    projectSelect.append(option);
+  }
+  projectSelect.value = state.inboxProject;
+  filters.append(projectSelect);
+
+  const sortSelect = document.createElement("select");
+  sortSelect.className = "sort";
+  sortSelect.dataset.inboxSort = "true";
+  sortSelect.setAttribute("aria-label", "Inbox sort");
+  for (const [value, label] of [["old", "Oldest first"], ["new", "Newest first"], ["byproject", "By project"]] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    sortSelect.append(option);
+  }
+  sortSelect.value = state.inboxSort;
+  filters.append(sortSelect);
+
+  const groupToggle = document.createElement("button");
+  groupToggle.className = "seg-btn";
+  groupToggle.dataset.act = "inbox-group";
+  groupToggle.textContent = "Group by project";
+  groupToggle.setAttribute("aria-pressed", String(state.inboxGroup));
+  filters.append(groupToggle);
+  nodes.push(filters);
+
+  const list = div("inbox-list");
+  list.append(mutedLine("Read-only: OpenChamber owns these lists. Click a row to open its project."));
+
+  if (state.inboxState === "loading" || state.inboxState === "idle") {
+    list.append(mutedLine("Reading open todos and plan steps…"));
+  } else if (state.inboxState === "error" || !state.inbox) {
+    list.append(mutedLine("Could not read the inbox."));
+  } else if (!state.inbox.available || !filteredInbox().length) {
+    const empty = div("empty");
+    const title = document.createElement("b");
+    title.textContent = "Nothing open. Nice.";
+    empty.append(title);
+    list.append(empty);
+  } else {
+    const rows = filteredInbox();
+    let lastProject = "";
+    for (const item of rows.slice(0, state.inboxLimit)) {
+      if (state.inboxGroup && item.projectId !== lastProject) {
+        lastProject = item.projectId;
+        const head = div("inbox-group-head");
+        head.textContent = findCard(item.projectId)?.project.name ?? item.projectId;
+        list.append(head);
+      }
+      list.append(renderInboxRow(item));
+    }
+    if (rows.length > state.inboxLimit) {
+      const more = actionButton(`Show ${rows.length - state.inboxLimit} more`, "inbox-more", "inbox-more");
+      list.append(more);
+    }
+    if (state.inbox.truncated) list.append(mutedLine("Cut at 1000 items."));
+  }
+  nodes.push(list);
+  return nodes;
+}
+
+/** Inbox items for visible projects, filtered and sorted. */
+function filteredInbox(): InboxItem[] {
+  const items = (state.inbox?.items ?? []).filter((item) => {
+    if (!state.showHidden && findCard(item.projectId)?.meta.hidden) return false;
+    if (state.inboxKind !== "all" && item.kind !== state.inboxKind) return false;
+    if (state.inboxProject !== "all" && item.projectId !== state.inboxProject) return false;
+    return true;
+  });
+  const age = (item: InboxItem): number => item.createdAt ?? Number.MAX_SAFE_INTEGER;
+  const name = (item: InboxItem): string =>
+    findCard(item.projectId)?.project.name ?? item.projectId;
+  if (state.inboxGroup) {
+    // Grouped: project first, the selected age order inside each group.
+    const dir = state.inboxSort === "new" ? -1 : 1;
+    items.sort((a, b) => name(a).localeCompare(name(b)) || dir * (age(a) - age(b)));
+    return items;
+  }
+  switch (state.inboxSort) {
+    case "new":
+      items.sort((a, b) => age(b) - age(a));
+      break;
+    case "byproject":
+      items.sort((a, b) => name(a).localeCompare(name(b)) || age(a) - age(b));
+      break;
+    default:
+      items.sort((a, b) => age(a) - age(b));
+  }
+  return items;
+}
+
+function renderInboxRow(item: InboxItem): HTMLElement {
+  const card = findCard(item.projectId);
+  const row = document.createElement("button");
+  row.className = "inbox-row";
+  row.dataset.openProject = item.projectId;
+  row.title = `Open ${card?.project.name ?? item.projectId}`;
+
+  const avatar = card ? renderAvatar(card) : div("avatar");
+  row.append(avatar);
+
+  const text = div("inbox-text");
+  text.textContent = item.text;
+  row.append(text);
+
+  if (item.kind === "step" && item.plan) {
+    const plan = chip(item.plan);
+    plan.title = item.planFile ?? item.plan;
+    row.append(plan);
+  } else {
+    row.append(chip(item.kind === "todo" ? "todo" : "step"));
+  }
+
+  const name = span("inbox-project", card?.project.name ?? item.projectId);
+  row.append(name, inboxAge(item.createdAt));
+  return row;
+}
+
+function inboxAge(createdAt: number | null): HTMLElement {
+  if (!createdAt) return span("inbox-age", "—");
+  const days = Math.max(0, Math.floor((Date.now() - createdAt) / 86_400_000));
+  const label = days < 1 ? "today" : `${days}d`;
+  const node = span("inbox-age", label);
+  if (days > 45) node.classList.add("fail");
+  else if (days > 14) node.classList.add("warn");
+  node.title = `${label} old`;
+  return node;
+}
+
+async function loadInbox(): Promise<void> {
+  if (state.inboxState === "loading") return;
+  state.inboxState = "loading";
+  if (state.tab === "inbox") render();
+  else scheduleRender();
+
+  try {
+    const response = await host.serviceRequest({ method: "GET", path: "/inbox" });
+    if (response.status !== 200) throw new Error(`service answered ${response.status}`);
+    state.inbox = JSON.parse(response.body) as InboxData;
+    state.inboxState = "ready";
+  } catch {
+    state.inboxState = "error";
+  }
+  render();
+}
 let rafId = 0;
 function scheduleRender(): void {
   if (rafId) return;
   rafId = requestAnimationFrame(() => {
     rafId = 0;
     const active = document.activeElement;
-    if (active instanceof HTMLInputElement && gridEl.contains(active)) return;
+    // Never yank an open editor or dropdown out from under the user.
+    if (active instanceof HTMLElement && gridEl.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+      return;
+    }
     render();
   });
 }
@@ -392,8 +690,10 @@ function renderCard(card: Card): HTMLElement {
   name.dataset.act = "detail";
   name.textContent = card.project.name;
   name.title = `Open ${card.project.name}`;
-  const path = span("path", card.vitals?.shortPath ?? card.project.directory);
-  names.append(name, path);
+  names.append(name);
+  if (state.density === "normal") {
+    names.append(span("path", card.vitals?.shortPath ?? card.project.directory));
+  }
 
   const pin = document.createElement("button");
   pin.className = "pin";
@@ -422,7 +722,15 @@ function renderCard(card: Card): HTMLElement {
   const stack = div("stack");
   for (const item of card.vitals?.stack ?? []) stack.append(span("", item));
 
-  el.append(top, buildMeta(card));
+  el.append(top, state.density === "minimal" ? minimalMeta(card) : buildMeta(card));
+  if (state.density === "minimal") {
+    if (card.editingGroup) el.append(renderGroupEditor(card));
+    else {
+      if (card.editingSite) el.append(renderSiteEditor(card));
+      el.append(minimalActions(card));
+    }
+    return el;
+  }
   if (summary.className) el.append(summary);
   if (stack.childElementCount) el.append(stack);
   if (card.editingGroup) el.append(renderGroupEditor(card));
@@ -431,6 +739,61 @@ function renderCard(card: Card): HTMLElement {
     el.append(buildActions(card));
   }
   return el;
+}
+
+/**
+ * Minimal card meta: the branch plus only attention-driving chips — never a
+ * problem hider. Healthy deployments and routine stats stay off the card.
+ */
+function minimalMeta(card: Card): HTMLElement {
+  const meta = div("meta");
+  if (card.vitals) {
+    if (card.vitals.branch) meta.append(chip(card.vitals.branch));
+    if (card.vitals.dirty) meta.append(chip(`±${card.vitals.dirty}`, "warn"));
+    if (card.vitals.ahead) {
+      const up = chip(`↑${card.vitals.ahead}`, "warn");
+      up.title = `${card.vitals.ahead} unpushed commit${card.vitals.ahead === 1 ? "" : "s"}`;
+      meta.append(up);
+    }
+    if (card.vitals.behind) {
+      const down = chip(`↓${card.vitals.behind}`);
+      down.title = `${card.vitals.behind} commit${card.vitals.behind === 1 ? "" : "s"} behind the upstream`;
+      meta.append(down);
+    }
+    if (card.vitals.dirty && card.vitals.dirtySince) {
+      const ageDays = Math.floor((Date.now() - card.vitals.dirtySince) / 86_400_000);
+      if (ageDays >= 3) {
+        const stale = chip(`dirty ${ageDays}d`, "warn");
+        stale.title = `Uncommitted changes since ${new Date(card.vitals.dirtySince).toLocaleDateString()}`;
+        meta.append(stale);
+      }
+    }
+  } else if (card.vitalsError) {
+    meta.append(chip(card.vitalsError, "fail"));
+  }
+  if (card.last?.outcome === "failed") meta.append(chip("last turn failed", "fail"));
+
+  if (!card.editingGroup) {
+    const group = chip(card.meta.group?.trim() ? card.meta.group.trim() : "+ group", "edit");
+    group.dataset.act = "edit-group";
+    group.title = card.meta.group ? `Group: ${card.meta.group}. Click to change it.` : "Put this project in a group.";
+    meta.append(group);
+  }
+
+  for (const dep of card.vitals?.deployments ?? []) {
+    const badCert = dep.cert && (!dep.cert.authorized || (dep.cert.daysLeft != null && dep.cert.daysLeft <= 21));
+    if (dep.live === false || badCert) meta.append(deploymentChip(dep));
+  }
+  return meta;
+}
+
+function minimalActions(card: Card): HTMLElement {
+  const actions = div("actions");
+  actions.append(actionButton(card.last ? "Resume" : "Start chat", "open", "primary"));
+  actions.append(actionButton("Folder", "folder"));
+  if (card.vitals?.web) actions.append(actionButton("GitHub", "github"));
+  actions.append(actionButton(card.meta.hidden ? "Unhide" : "Hide", card.meta.hidden ? "unhide" : "hide"));
+  return actions;
 }
 
 function buildMeta(card: Card): HTMLElement {
@@ -537,6 +900,8 @@ function renderDetail(card: Card): HTMLElement {
   wrap.append(renderActivityPanel(card));
   wrap.append(renderGitPanel(card));
   wrap.append(renderDeploymentsPanel(card));
+  wrap.append(renderSpendPanel(card));
+  wrap.append(renderDiskPanel(card));
   wrap.append(renderKnowledgePanel(card));
   return wrap;
 }
@@ -799,6 +1164,85 @@ function renderDeploymentsPanel(card: Card): HTMLElement {
   return section;
 }
 
+/* ------------------------------------------------------ spend board view */
+
+function renderSpendBoardView(): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
+  const filters = div("inbox-filters");
+  for (const days of [7, 30, 90]) {
+    const button = document.createElement("button");
+    button.className = "seg-btn";
+    button.dataset.act = `range-${days}`;
+    button.textContent = `${days}d`;
+    button.setAttribute("aria-pressed", String(state.range === days));
+    filters.append(button);
+  }
+  nodes.push(filters);
+
+  const list = div("spend-list");
+  list.append(mutedLine(`Model tokens per project over the last ${state.range} days.`));
+
+  const cards = tabCards();
+  if (state.spendBoardState === "loading") {
+    list.append(
+      mutedLine(
+        `Reading ${state.spendBoardProgress.done} of ${state.spendBoardProgress.total}…`,
+      ),
+    );
+  }
+
+  const rows = cards
+    .map((card) => ({ card, spend: state.spendBoard.get(card.project.id) ?? null }))
+    .filter((row) => row.spend && row.spend.available && row.spend.tokens.total > 0)
+    .sort((a, b) => (b.spend?.tokens.total ?? 0) - (a.spend?.tokens.total ?? 0));
+
+  if (!rows.length && state.spendBoardState === "ready") {
+    list.append(mutedLine("No model usage reported for this range."));
+  }
+
+  const max = Math.max(1, ...rows.map((row) => row.spend?.tokens.total ?? 0));
+  const showCost = rows.some((row) => (row.spend?.cost ?? 0) > 0);
+  let totalTokens = 0;
+  let totalCost = 0;
+  for (const { card, spend } of rows) {
+    totalTokens += spend?.tokens.total ?? 0;
+    totalCost += spend?.cost ?? 0;
+    const row = document.createElement("button");
+    row.className = "spend-row";
+    row.dataset.openProject = card.project.id;
+    row.title = `Open ${card.project.name}`;
+    row.append(span("spend-name", card.project.name));
+    const track = div("spend-track");
+    const fill = document.createElement("i");
+    fill.className = "spend-fill";
+    fill.style.width = `${Math.max(1, Math.round(((spend?.tokens.total ?? 0) / max) * 100))}%`;
+    fill.style.background = card.iconColor || hueColor(card.project.id);
+    track.append(fill);
+    row.append(track);
+    row.append(
+      span(
+        "spend-value",
+        tokensLabel(spend?.tokens.total ?? 0) + (showCost && (spend?.cost ?? 0) > 0 ? ` · $${(spend?.cost ?? 0).toFixed(2)}` : ""),
+      ),
+    );
+    list.append(row);
+  }
+
+  if (rows.length) {
+    const total = document.createElement("div");
+    total.className = "spend-row total";
+    total.append(span("spend-name", `${rows.length} project${rows.length === 1 ? "" : "s"}`));
+    const track = div("spend-track");
+    total.append(track);
+    total.append(
+      span("spend-value", tokensLabel(totalTokens) + (showCost ? ` · $${totalCost.toFixed(2)}` : "")),
+    );
+    list.append(total);
+  }
+  nodes.push(list);
+  return nodes;
+}
+
 /** Timestamp of the first entry in the current trailing run of failed checks. */
 function downSinceMs(entries: ProbeEntry[]): number | null {
   let first: number | null = null;
@@ -807,6 +1251,197 @@ function downSinceMs(entries: ProbeEntry[]): number | null {
     first = entries[index].at;
   }
   return first;
+}
+
+function renderSpendPanel(card: Card): HTMLElement {
+  const section = div("panel");
+
+  const head = div("panel-head");
+  const title = document.createElement("h3");
+  title.textContent = "Spend";
+  const seg = div("seg");
+  for (const days of [7, 30, 90]) {
+    const button = document.createElement("button");
+    button.className = "seg-btn";
+    button.dataset.act = `range-${days}`;
+    button.textContent = `${days}d`;
+    button.setAttribute("aria-pressed", String(state.range === days));
+    seg.append(button);
+  }
+  head.append(title, seg);
+  section.append(head);
+
+  if (state.spendFor !== card.project.id || state.spendState === "loading" || state.spendState === "idle") {
+    section.append(mutedLine("Reading model usage…"));
+    return section;
+  }
+  if (state.spendState === "error" || !state.spend) {
+    section.append(mutedLine("Could not read spend for this project."));
+    return section;
+  }
+
+  const data = state.spend;
+  section.append(mutedLine(`Last ${data.days} days. Tokens include cache reads.`));
+  if (!data.available || (data.tokens.total <= 0 && data.cost <= 0)) {
+    section.append(mutedLine("No model usage reported for this range."));
+    return section;
+  }
+
+  const stats = div("stats");
+  const cells: Array<[string, string]> = [
+    [tokensLabel(data.tokens.total), "tokens"],
+    [data.cost > 0 ? `$${data.cost.toFixed(2)}` : "not reported", "cost"],
+    [data.sessions.toLocaleString(), "sessions"],
+  ];
+  for (const [value, label] of cells) {
+    const cell = div("stat");
+    const strong = document.createElement("b");
+    strong.textContent = value;
+    cell.append(strong, span("", label));
+    stats.append(cell);
+  }
+  section.append(stats);
+
+  if (data.models.length) {
+    const bar = div("spend-bar");
+    for (const model of data.models) {
+      if (model.share <= 0) continue;
+      const segFill = document.createElement("i");
+      segFill.className = "spend-seg";
+      segFill.style.width = `${Math.max(1, Math.round(model.share * 100))}%`;
+      segFill.style.background = hueColor(model.name);
+      segFill.title = `${model.name} · ${Math.round(model.share * 100)}%`;
+      bar.append(segFill);
+    }
+    section.append(bar);
+
+    const legend = div("spend-legend");
+    for (const model of data.models) {
+      const row = div("spend-legend-row");
+      const swatch = document.createElement("i");
+      swatch.className = "spend-swatch";
+      swatch.style.background = hueColor(model.name);
+      row.append(swatch, span("", model.name));
+      const value = span("spend-value", `${tokensLabel(model.tokens)} · ${Math.round(model.share * 100)}%`);
+      row.append(value);
+      legend.append(row);
+    }
+    section.append(legend);
+  }
+  return section;
+}
+
+function renderDiskPanel(card: Card): HTMLElement {
+  const section = div("panel");
+
+  const head = div("panel-head");
+  const title = document.createElement("h3");
+  title.textContent = "Disk";
+  head.append(title);
+  section.append(head);
+
+  section.append(mutedLine("Read-only: nothing here deletes anything."));
+
+  if (state.diskFor !== card.project.id || state.diskState === "loading" || state.diskState === "idle") {
+    section.append(mutedLine("Walking the folder…"));
+    return section;
+  }
+  if (state.diskState === "error" || !state.disk) {
+    section.append(mutedLine("Could not measure this folder."));
+    return section;
+  }
+
+  const data = state.disk;
+  if (!data.available) {
+    section.append(mutedLine("This folder is not on disk."));
+    return section;
+  }
+  if (data.truncated) section.append(mutedLine("Partial: the walk stopped early (time or file budget)."));
+
+  const bar = div("disk-bar");
+  for (const category of data.categories) {
+    if (category.bytes <= 0 || data.total <= 0) continue;
+    const segFill = document.createElement("i");
+    segFill.className = "disk-seg";
+    segFill.style.width = `${Math.max(1, Math.round((category.bytes / data.total) * 100))}%`;
+    segFill.style.background = hueColor(`disk:${category.id}`);
+    segFill.title = `${category.label} · ${bytes(category.bytes)}`;
+    bar.append(segFill);
+  }
+  section.append(bar);
+
+  const reclaimable = data.categories.filter((category) => category.reclaimable && category.bytes > 0);
+  section.append(
+    mutedLine(
+      reclaimable.length
+        ? `Reclaimable: ${bytes(data.reclaimableBytes)} (${reclaimable.map((category) => category.label).join(", ")})`
+        : "Nothing reclaimable found.",
+    ),
+  );
+
+  const rows = div("disk-rows");
+  for (const category of data.categories) {
+    if (category.files <= 0) continue;
+    rows.append(diskRow(category.label, category.bytes, data.total, hueColor(`disk:${category.id}`), category.paths[0] ?? null));
+  }
+  if (data.children.length) {
+    const headRow = div("inbox-group-head");
+    headRow.textContent = "Largest in the project root";
+    rows.append(headRow);
+    for (const child of data.children) {
+      rows.append(diskRow(child.name + (child.isDir ? "/" : ""), child.bytes, data.total, null, child.name));
+    }
+  }
+  section.append(rows);
+  return section;
+}
+
+function diskRow(label: string, value: number, total: number, color: string | null, rel: string | null): HTMLElement {
+  const row = div("disk-row");
+  if (color) {
+    const swatch = document.createElement("i");
+    swatch.className = "spend-swatch";
+    swatch.style.background = color;
+    row.append(swatch);
+  }
+  const name = span("disk-label", label);
+  if (rel) name.title = rel;
+  row.append(name);
+  row.append(span("disk-value", `${bytes(value)}${total > 0 ? ` · ${Math.round((value / total) * 100)}%` : ""}`));
+  if (rel) {
+    const reveal = actionButton("Reveal", "reveal-path");
+    reveal.dataset.rel = rel;
+    const copy = actionButton("Copy path", "copy-rel");
+    copy.dataset.rel = rel;
+    row.append(reveal, copy);
+  }
+  return row;
+}
+
+function tokensLabel(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+function joinDiskPath(directory: string, rel: string): string {
+  const sep = directory.includes("\\") ? "\\" : "/";
+  const clean = rel.replace(/[\\/]+/g, sep);
+  return directory.endsWith(sep) ? directory + clean : directory + sep + clean;
+}
+
+async function revealDiskPath(card: Card, rel: string): Promise<void> {
+  try {
+    const response = await host.serviceRequest({
+      method: "POST",
+      path: "/reveal",
+      body: JSON.stringify({ directory: card.project.directory, path: rel }),
+    });
+    if (response.status === 200) toast("success", "Opened in the file manager");
+    else toast("error", "Could not open that path");
+  } catch (error) {
+    toast("error", messageOf(error));
+  }
 }
 
 function renderKnowledgePanel(card: Card): HTMLElement {
@@ -898,6 +1533,82 @@ async function loadActivity(card: Card, days = state.range): Promise<void> {
     if (state.activityFor !== card.project.id) return;
     state.activityState = "error";
   }
+  render();
+}
+
+/** Token spend, loaded lazily like /size so a slow stats run never blocks the page. */
+async function loadSpend(card: Card, days = state.range): Promise<void> {
+  state.spendFor = card.project.id;
+  state.spendState = "loading";
+  state.spend = null;
+  render();
+
+  try {
+    const response = await host.serviceRequest({
+      method: "GET",
+      path: "/spend",
+      query: { directory: card.project.directory, days: String(days) },
+    });
+    if (response.status !== 200) throw new Error(`service answered ${response.status}`);
+    if (state.spendFor !== card.project.id) return;
+    state.spend = JSON.parse(response.body) as SpendData;
+    state.spendState = "ready";
+  } catch {
+    if (state.spendFor !== card.project.id) return;
+    state.spendState = "error";
+  }
+  render();
+}
+
+/** Disk breakdown, loaded lazily like /size so a slow walk never blocks the page. */
+async function loadDisk(card: Card): Promise<void> {
+  state.diskFor = card.project.id;
+  state.diskState = "loading";
+  state.disk = null;
+  render();
+
+  try {
+    const response = await host.serviceRequest({
+      method: "GET",
+      path: "/disk",
+      query: { directory: card.project.directory },
+    });
+    if (response.status !== 200) throw new Error(`service answered ${response.status}`);
+    if (state.diskFor !== card.project.id) return;
+    state.disk = JSON.parse(response.body) as DiskData;
+    state.diskState = "ready";
+  } catch {
+    if (state.diskFor !== card.project.id) return;
+    state.diskState = "error";
+  }
+  render();
+}
+
+/** Board Spend tab: per-project totals, one slow project at a time. */
+async function loadSpendBoard(): Promise<void> {
+  if (state.spendBoardState === "loading") return;
+  const cards = tabCards();
+  state.spendBoardState = "loading";
+  state.spendBoardProgress = { done: 0, total: cards.length };
+  render();
+
+  for (const card of cards) {
+    try {
+      const response = await host.serviceRequest({
+        method: "GET",
+        path: "/spend",
+        query: { directory: card.project.directory, days: String(state.range) },
+      });
+      if (response.status === 200) {
+        state.spendBoard.set(card.project.id, JSON.parse(response.body) as SpendData);
+      }
+    } catch {
+      /* that project's bar stays empty */
+    }
+    state.spendBoardProgress.done += 1;
+    scheduleRender();
+  }
+  state.spendBoardState = "ready";
   render();
 }
 
@@ -1126,6 +1837,8 @@ async function boot(): Promise<void> {
       if (typeof settings.groupOn === "boolean") state.groupOn = settings.groupOn;
       if (typeof settings.showHidden === "boolean") state.showHidden = settings.showHidden;
       if (settings.collapsed && typeof settings.collapsed === "object") state.collapsed = settings.collapsed;
+      if (settings.density === "minimal" || settings.density === "normal") state.density = settings.density;
+      if (settings.view === "board" || settings.view === "inbox" || settings.view === "spend") state.tab = settings.view;
     }
     aiEl.checked = state.ai;
 
@@ -1189,6 +1902,9 @@ async function boot(): Promise<void> {
     render();
     await Promise.all(state.cards.map((card) => loadProject(card)));
     scheduleRender();
+    // Badge count for the Inbox tab; the full Spend board loads when first opened.
+    void loadInbox();
+    if (state.tab === "spend") void loadSpendBoard();
   } catch (error) {
     const code = errorCode(error);
     if (code === "NOT_GRANTED") {
@@ -1425,7 +2141,15 @@ function findCard(id: string | undefined): Card | undefined {
 }
 
 gridEl.addEventListener("click", (event) => {
-  const target = (event.target as HTMLElement).closest<HTMLElement>("[data-act]");
+  const el = event.target as HTMLElement;
+  const opener = el.closest<HTMLElement>("[data-open-project]");
+  if (opener && !opener.closest<HTMLElement>(".card")) {
+    const card = findCard(opener.dataset.openProject);
+    if (card) openDetail(card);
+    return;
+  }
+
+  const target = el.closest<HTMLElement>("[data-act]");
   if (!target) return;
 
   if (target.dataset.act === "collapse") {
@@ -1433,6 +2157,46 @@ gridEl.addEventListener("click", (event) => {
     state.collapsed[key] = !state.collapsed[key];
     if (!state.collapsed[key]) delete state.collapsed[key];
     void saveSettings();
+    render();
+    return;
+  }
+
+  // Board-level controls live outside any card; handle them before card lookup.
+  const rangeMatch = /^range-(\d+)$/.exec(target.dataset.act ?? "");
+  if (rangeMatch) {
+    state.range = Number(rangeMatch[1]) || 30;
+    if (state.view === "project") {
+      const rangeCard = findCard(
+        target.closest<HTMLElement>(".card")?.dataset.id ?? state.viewId ?? undefined,
+      );
+      state.activity = null;
+      state.activityState = "idle";
+      render();
+      if (rangeCard) {
+        void loadActivity(rangeCard, state.range);
+        void loadSpend(rangeCard, state.range);
+      }
+    } else {
+      if (state.tab === "spend") void loadSpendBoard();
+      render();
+    }
+    return;
+  }
+
+  if (target.dataset.act === "inbox-group") {
+    state.inboxGroup = !state.inboxGroup;
+    render();
+    return;
+  }
+  if (target.dataset.act === "inbox-more") {
+    state.inboxLimit += 150;
+    render();
+    return;
+  }
+  const inboxKindMatch = /^inbox-kind-(all|todo|step)$/.exec(target.dataset.act ?? "");
+  if (inboxKindMatch) {
+    state.inboxKind = inboxKindMatch[1] as typeof state.inboxKind;
+    state.inboxLimit = 150;
     render();
     return;
   }
@@ -1449,7 +2213,35 @@ gridEl.addEventListener("click", (event) => {
     return;
   }
 
+  if (target.dataset.act === "reveal-path" || target.dataset.act === "copy-rel") {
+    const rel = target.dataset.rel ?? "";
+    if (!rel) return;
+    if (target.dataset.act === "copy-rel") {
+      void host
+        .writeClipboard(joinDiskPath(card.project.directory, rel))
+        .then(() => toast("success", "Path copied"))
+        .catch(() => {});
+    } else {
+      void revealDiskPath(card, rel);
+    }
+    return;
+  }
+
   void runAction(card, target.dataset.act ?? "");
+});
+
+gridEl.addEventListener("change", (event) => {
+  const select = event.target as HTMLSelectElement;
+  if (select.matches("[data-inbox-project]")) {
+    state.inboxProject = select.value;
+    state.inboxLimit = 150;
+    render();
+    return;
+  }
+  if (select.matches("[data-inbox-sort]")) {
+    state.inboxSort = select.value as typeof state.inboxSort;
+    render();
+  }
 });
 
 gridEl.addEventListener("input", (event) => {
@@ -1466,7 +2258,14 @@ gridEl.addEventListener("input", (event) => {
 });
 
 async function saveSettings(): Promise<void> {
-  const settings: Settings = { ai: state.ai, groupOn: state.groupOn, collapsed: state.collapsed, showHidden: state.showHidden };
+  const settings: Settings = {
+    ai: state.ai,
+    groupOn: state.groupOn,
+    collapsed: state.collapsed,
+    showHidden: state.showHidden,
+    density: state.density,
+    view: state.tab,
+  };
   await host.storage.set(SETTINGS_KEY, settings).catch(() => {});
 }
 
@@ -1493,38 +2292,39 @@ async function saveGroup(card: Card): Promise<void> {
   render();
 }
 
+/** Open a project's full page: activity, commits, spend, disk, plans. */
+function openDetail(card: Card): void {
+  state.view = "project";
+  state.viewId = card.project.id;
+  state.range = 30;
+  state.activity = null;
+  state.activityState = "idle";
+  state.activityFor = null;
+  state.git = null;
+  state.gitState = "idle";
+  state.gitFor = null;
+  state.spend = null;
+  state.spendState = "idle";
+  state.spendFor = null;
+  state.disk = null;
+  state.diskState = "idle";
+  state.diskFor = null;
+  render();
+  void loadActivity(card, 30);
+  void loadGit(card);
+  void loadSpend(card, 30);
+  void loadDisk(card);
+}
+
 async function runAction(card: Card, act: string): Promise<void> {
   switch (act) {
     case "detail":
-      state.view = "project";
-      state.viewId = card.project.id;
-      state.range = 30;
-      state.activity = null;
-      state.activityState = "idle";
-      state.activityFor = null;
-      state.git = null;
-      state.gitState = "idle";
-      state.gitFor = null;
-      render();
-      void loadActivity(card, 30);
-      void loadGit(card);
-      return;
+      return openDetail(card);
     case "back":
       state.view = "board";
       state.viewId = null;
       render();
       return;
-    case "range-7":
-    case "range-30":
-    case "range-90": {
-      const days = Number(act.slice("range-".length)) || 30;
-      state.range = days;
-      state.activity = null;
-      state.activityState = "idle";
-      render();
-      void loadActivity(card, days);
-      return;
-    }
     case "open":
       return openProject(card);
     case "new":
@@ -1826,6 +2626,30 @@ hiddenEl.addEventListener("click", () => {
   void saveSettings();
   render();
 });
+
+for (const tab of tabEls) {
+  tab.addEventListener("click", () => {
+    const next = tab.dataset.tab as BoardTab;
+    if (next === state.tab) return;
+    state.tab = next;
+    state.view = "board";
+    state.viewId = null;
+    void saveSettings();
+    render();
+    if (next === "inbox" && state.inboxState === "idle") void loadInbox();
+    if (next === "spend" && state.spendBoardState === "idle") void loadSpendBoard();
+  });
+}
+
+for (const button of densityEls) {
+  button.addEventListener("click", () => {
+    const next = button.dataset.density as Density;
+    if (next === state.density) return;
+    state.density = next;
+    void saveSettings();
+    render();
+  });
+}
 
 refreshEl.addEventListener("click", () => {
   refreshEl.disabled = true;

@@ -47,7 +47,10 @@ It listens on `127.0.0.1:$OPENCHAMBER_SERVICE_PORT` and requires
 | `GET /readme?directory=…` | up to 8 KB of README plus a change hash |
 | `GET /projects` | project list, icons and colours from OpenChamber's settings |
 | `GET /activity?directory=…&projectId=…&days=N` | daily activity, totals, plans and todos |
-| `POST /reveal` | open the folder in Explorer / Finder |
+| `GET /inbox` | open todos and open plan steps across every project |
+| `GET /spend?directory=…&days=N` | model tokens, cost and per-model share |
+| `GET /disk?directory=…&force=` | size by category plus the largest root children |
+| `POST /reveal` | open the folder in Explorer / Finder, or a path inside it |
 | `POST /refresh` | drop the cached facts, git history and size for one folder |
 
 Paths must be absolute. A relative path is a `400` — the service has no "current project".
@@ -67,7 +70,10 @@ Paths must be absolute. A relative path is a `400` — the service has no "curre
 | Live status | `GET` on the deployment URL, 4.5 s timeout, redirects followed |
 | TLS certificate | `node:tls` connect to host:443 with SNI, 4 s timeout, verification off |
 | Activity | `opencode stats --json --full --days N --project .`, run in the project folder |
+| Spend | `opencode stats --json --full --cost --models --days N --project .` (at most two at once) |
 | Plans and todos | `~/.config/openchamber/projects/<project id>/context.json` and its markdown plans |
+| Inbox | every project's `context.json` plus each plan's markdown (open todos, `- [ ]` lines) |
+| Disk breakdown | same walker as size; segments matched to `node_modules`, `vendor`, `.git`, build output, caches, virtualenvs |
 | Icon | `~/.config/openchamber/project-icons/project-<sha1(project id)>.<ext>` |
 | Colour | `iconBackground` or `color` from `settings.json` |
 
@@ -84,6 +90,9 @@ The config directory is `~/.config/openchamber`, or
 | Deployment probe (live, ms, cert) | 10 min (`force=1` on `/vitals` re-probes) |
 | Projects and icons | 2 min |
 | Activity | 2 min per project and range |
+| Spend | 5 min per directory and range |
+| Inbox | 60 s for the whole list |
+| Disk breakdown | 12 h per directory (`force=1` re-walks) |
 | Plans and todos | 60 s |
 
 Sizes are measured in the background and cached; a partial walk is reported with `+` and a
@@ -122,8 +131,30 @@ soon-expiring (≤ 7 days) certificate adds 400.
 
 One storage key per project, `atlas:v1:meta:<projectId>` =
 `{ pinned, group, hidden }`, deleted again when it holds only defaults. Board settings
-(group on/off, collapsed sections, show-hidden) live in `atlas:v1:settings` next to the AI
-toggle. Search also matches the group name; hidden projects leave the footer count.
+(group on/off, collapsed sections, show-hidden, density, the Board/Inbox/Spend tab) live in
+`atlas:v1:settings` next to the AI toggle. Search also matches the group name; hidden
+projects leave the footer count. Minimal density hides stats and descriptions but never a
+problem chip, and the project page always renders in full.
+
+## Inbox, spend and disk
+
+`/inbox` walks every known project's `context.json` (open todos) and each plan markdown
+(open `- [ ]` lines, with the plan title and file). Malformed files are skipped, never
+thrown; the list caps at 1000 items with a `truncated` flag. The panel shows 150 rows at a
+time behind "Show N more" and says it is read-only: OpenChamber owns those lists.
+
+`/spend` parses `tokens` (`input`, `output`, `reasoning`, `cache.read`, `cache.write`),
+`sessions`, `cost` and the `models` array defensively — missing or oddly shaped fields
+become 0 or are skipped. Many setups report `cost: 0` (free or unpriced models), so the
+panel leads with tokens and prints `not reported` for cost. At most two stats processes run
+at once across requests; the board Spend tab loads projects one by one with a progress hint.
+
+`/disk` reuses the size walker's 12 s / 300k-file budget and attributes each file to the
+category of its shallowest matching directory segment, so a nested `node_modules` counts
+once. Reclaimable means regenerable (everything except `.git` and source). Rows carry
+relative paths; **Reveal** accepts only paths inside the project (absolute paths, `..`
+escapes and sibling-prefix tricks like `<project>-evil` are `400`s). The panel never
+deletes — there is no delete route.
 
 ## Privacy and network
 
@@ -142,8 +173,9 @@ toggle. Search also matches the group name; hidden projects leave the footer cou
 - Steps count agent steps, not minutes or commits — the **Commits** panel is the honest signal.
 - The probe history only records checks observed while Atlas is open (one entry per URL per
   5 minutes, 40 kept); it is not continuous monitoring.
-- The activity graph needs `opencode` on `PATH`; the app's bundled CLI is tried as a fallback
-  on Windows.
+- The activity graph and spend need `opencode` on `PATH`; the app's bundled CLI is tried
+  as a fallback on Windows. Without it, spend reports no usage.
+- Spend cost is often `0` (free or unpriced models) — tokens are the primary metric.
 - Deployment detection only sees what is committed in the repo (and `.env` files). Many
   WordPress and client sites need **+ site**.
 - VS Code does not load OpenChamber extensions. The mobile app does, for the panel and page

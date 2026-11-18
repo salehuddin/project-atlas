@@ -489,6 +489,21 @@ export function handleService(path: string, query: Record<string, string>) {
       return json(gitHistory(project.id));
     }
 
+    case "/inbox":
+      return json(demoInbox());
+
+    case "/spend": {
+      const project = byDirectory(query.directory);
+      if (!project) return { status: 404, headers: {}, body: "{}" };
+      return json(demoSpend(project.id, Math.min(90, Math.max(1, Number(query.days) || 30))));
+    }
+
+    case "/disk": {
+      const project = byDirectory(query.directory);
+      if (!project) return { status: 404, headers: {}, body: "{}" };
+      return json(demoDisk(project.id));
+    }
+
     case "/activity":
       return json(activity(query.projectId, Number(query.days) || 30));
 
@@ -551,72 +566,131 @@ function activity(projectId: string, days: number) {
   };
 }
 
-/** Plans and todos per demo project, so each project page reads as its own project. */
+/** Plans and todos per demo project, so each project page and the inbox read as real, distinct work. */
 function knowledgeFor(projectId: string) {
   const todo = (text: string, days: number) => ({ text, createdAt: Date.now() - days * DAY });
-  const plan = (id: string, title: string, total: number, done: number) => ({
+  const plan = (id: string, title: string, total: number, done: number, steps: Array<[string, number]> = []) => ({
     id,
     file: `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`,
     title,
     total,
     done,
     open: total - done,
+    /** Demo only: the open step lines and their age in days, for the inbox. */
+    steps: steps.map(([text, days]) => ({ text, createdAt: Date.now() - days * DAY })),
+  });
+  const wrap = (todos: ReturnType<typeof todo>[], plans: ReturnType<typeof plan>[], doneTodos: number) => ({
+    available: true,
+    openTodos: todos.length,
+    doneTodos,
+    notes: 0,
+    todos,
+    plans,
   });
 
-  if (projectId === "demo_paperkite") {
-    return {
-      available: true,
-      openTodos: 5,
-      doneTodos: 9,
-      notes: 0,
-      todos: [
-        todo("Fix the staging deploy before the Tooltip docs go out", 1),
-        todo("Add keyboard shortcuts to the component playground", 2),
-        todo("Write the migration guide for the 2.0 token names", 4),
-        todo("Check colour contrast on every dark-theme example", 7),
-      ],
-      plans: [
-        plan("p1", "Component playground with live previews", 8, 5),
-        plan("p2", "Design token migration guide", 5, 1),
-        plan("p3", "Search across the docs", 4, 4),
-      ],
-    };
-  }
+  switch (projectId) {
+    case "demo_lumen":
+      return wrap(
+        [
+          todo("Send order-ready SMS when a pickup slot is confirmed", 2),
+          todo("Show allergen warnings on the cart page, not only the product page", 3),
+          todo("Replace the placeholder hero photo with the new bakery shoot", 6),
+          todo("Load-test checkout before the holiday menu goes live", 8),
+          todo("Move image uploads to signed URLs", 9),
+        ],
+        [
+          plan("p1", "Online ordering and pickup slots", 9, 5, [
+            ["Block slots that are already full", 12],
+            ["Email a receipt with the pickup time", 12],
+          ]),
+          plan("p2", "Allergen labels on every product", 4, 3, [["Add the nut-free filter to the menu", 5]]),
+          plan("p3", "Admin order board for the kitchen", 6, 1, [
+            ["Group orders by pickup hour", 21],
+            ["Print a packing slip per order", 21],
+          ]),
+          plan("p4", "Holiday menu landing page", 6, 6),
+        ],
+        12,
+      );
 
-  if (projectId === "demo_lumen") {
-    return {
-      available: true,
-      openTodos: 7,
-      doneTodos: 12,
-      notes: 0,
-      todos: [
-        todo("Send order-ready SMS when a pickup slot is confirmed", 2),
-        todo("Show allergen warnings on the cart page, not only the product page", 3),
-        todo("Replace the placeholder hero photo with the new bakery shoot", 6),
-        todo("Load-test checkout before the holiday menu goes live", 8),
-        todo("Move image uploads to signed URLs", 9),
-      ],
-      plans: [
-        plan("p1", "Online ordering and pickup slots", 9, 5),
-        plan("p2", "Allergen labels on every product", 4, 3),
-        plan("p3", "Admin order board for the kitchen", 6, 1),
-        plan("p4", "Holiday menu landing page", 6, 6),
-      ],
-    };
-  }
+    case "demo_orbit":
+      return wrap(
+        [
+          todo("Decide the retention period for deleted contacts", 52),
+          todo("Rate-limit the inbox sync endpoint", 24),
+          todo("Add a dark mode to the pipeline board", 16),
+          todo("Fix the duplicate reminder emails on Mondays", 3),
+        ],
+        [
+          plan("p1", "Reminders as queued jobs", 7, 4, [
+            ["Backfill existing reminders into the queue", 6],
+            ["Alert when the queue backs up", 6],
+          ]),
+          plan("p2", "Contact import from CSV", 5, 1, [["Map custom fields during import", 33]]),
+        ],
+        15,
+      );
 
-  return {
-    available: true,
-    openTodos: 3,
-    doneTodos: 6,
-    notes: 0,
-    todos: [
-      todo("Review the open pull requests", 2),
-      todo("Update the README with the new setup steps", 5),
-      todo("Plan the next release", 9),
-    ],
-    plans: [plan("p1", "Next release", 6, 3), plan("p2", "Cleanup and refactors", 5, 2)],
-  };
+    case "demo_tidepool":
+      return wrap(
+        [
+          todo("Document the station lookup rate limits", 19),
+          todo("Add a health endpoint for the nightly import", 11),
+          todo("Switch the weather provider before the contract ends", 4),
+        ],
+        [plan("p1", "Cache station lookups", 6, 4, [["Invalidate the cache after each import", 7]])],
+        10,
+      );
+
+    case "demo_fieldnotes":
+      return wrap(
+        [
+          todo("Reproduce the photo upload failure on slow connections", 1),
+          todo("Compress GPS traces before sync", 14),
+          todo("Add a tag filter to the notes list", 27),
+        ],
+        [
+          plan("p1", "Reliable offline sync", 8, 5, [
+            ["Retry failed uploads with backoff", 2],
+            ["Show sync status in the header", 2],
+          ]),
+          plan("p2", "Share a survey as a PDF", 4, 0, [["Choose a layout for photos", 48]]),
+        ],
+        7,
+      );
+
+    case "demo_northwind":
+      return wrap(
+        [
+          todo("Replace the placeholder case study images", 38),
+          todo("Ask the client for the new team photos", 12),
+        ],
+        [plan("p1", "Launch checklist", 5, 3, [["Submit the sitemap to search engines", 9], ["Set up redirects from the old site", 9]])],
+        5,
+      );
+
+    case "demo_paperkite":
+      return wrap(
+        [
+          todo("Fix the staging deploy before the Tooltip docs go out", 1),
+          todo("Add keyboard shortcuts to the component playground", 2),
+          todo("Write the migration guide for the 2.0 token names", 4),
+          todo("Check colour contrast on every dark-theme example", 7),
+        ],
+        [
+          plan("p1", "Component playground with live previews", 8, 5, [
+            ["Persist the selected theme between visits", 5],
+            ["Add a copy-code button to every example", 5],
+          ]),
+          plan("p2", "Design token migration guide", 5, 1, [["Write the before and after table", 15]]),
+          plan("p3", "Search across the docs", 4, 4),
+        ],
+        9,
+      );
+
+    default:
+      return wrap([todo("Review the open pull requests", 2)], [], 0);
+  }
 }
 
 /* -------------------------------------------------------- git history */
@@ -694,5 +768,242 @@ function gitHistory(projectId: string) {
     upstream: project.ahead || project.behind ? "origin/main" : null,
     dirtySince: project.dirtyDays == null ? null : Date.now() - project.dirtyDays * DAY,
     detached: project.detached,
+  };
+}
+
+/* --------------------------------------------- inbox, spend and disk */
+
+const MB = 1024 * 1024;
+
+/** Cross-project open work, built from the same invented knowledge as the page. */
+function demoInbox() {
+  const items = [];
+  for (const project of PROJECTS) {
+    const knowledge = knowledgeFor(project.id);
+    for (const todo of knowledge.todos) {
+      items.push({
+        projectId: project.id,
+        kind: "todo",
+        text: todo.text,
+        plan: null,
+        planFile: null,
+        createdAt: todo.createdAt,
+      });
+    }
+    for (const plan of knowledge.plans) {
+      for (const step of plan.steps) {
+        items.push({
+          projectId: project.id,
+          kind: "step",
+          text: step.text,
+          plan: plan.title,
+          planFile: plan.file,
+          createdAt: step.createdAt,
+        });
+      }
+    }
+  }
+  return {
+    available: true,
+    items,
+    counts: {
+      todos: items.filter((item) => item.kind === "todo").length,
+      steps: items.filter((item) => item.kind === "step").length,
+    },
+    truncated: false,
+  };
+}
+
+const DEMO_SPEND = {
+  demo_lumen: {
+    tokens: { input: 1_240_000, output: 310_000, reasoning: 82_000, cacheRead: 2_150_000, cacheWrite: 96_000 },
+    sessions: 17,
+    cost: 0,
+    models: [
+      { name: "atlas-sonnet", tokens: 2_900_000, cost: 0 },
+      { name: "atlas-haiku", tokens: 978_000, cost: 0 },
+    ],
+  },
+  demo_orbit: {
+    tokens: { input: 640_000, output: 190_000, reasoning: 12_000, cacheRead: 480_000, cacheWrite: 30_000 },
+    sessions: 9,
+    cost: 4.2,
+    models: [
+      { name: "atlas-sonnet", tokens: 900_000, cost: 3.1 },
+      { name: "atlas-opus", tokens: 452_000, cost: 1.1 },
+    ],
+  },
+  demo_tidepool: {
+    tokens: { input: 96_000, output: 24_000, reasoning: 0, cacheRead: 60_000, cacheWrite: 4_000 },
+    sessions: 3,
+    cost: 0,
+    models: [{ name: "atlas-haiku", tokens: 184_000, cost: 0 }],
+  },
+  demo_fieldnotes: {
+    tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    sessions: 0,
+    cost: 0,
+    models: [],
+  },
+  demo_paperkite: {
+    tokens: { input: 210_000, output: 48_000, reasoning: 6_000, cacheRead: 120_000, cacheWrite: 9_000 },
+    sessions: 4,
+    cost: 0,
+    models: [
+      { name: "atlas-sonnet", tokens: 260_000, cost: 0 },
+      { name: "atlas-haiku", tokens: 133_000, cost: 0 },
+    ],
+  },
+  demo_northwind: {
+    tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    sessions: 0,
+    cost: 0,
+    models: [],
+  },
+};
+
+/** Token spend per project; scaled by range, cost only when greater than 0. */
+function demoSpend(projectId: string, days: number) {
+  const seed = DEMO_SPEND[projectId] ?? DEMO_SPEND.demo_lumen;
+  const scale = days / 30;
+  const tokens = {
+    input: Math.round(seed.tokens.input * scale),
+    output: Math.round(seed.tokens.output * scale),
+    reasoning: Math.round(seed.tokens.reasoning * scale),
+    cacheRead: Math.round(seed.tokens.cacheRead * scale),
+    cacheWrite: Math.round(seed.tokens.cacheWrite * scale),
+    total: 0,
+  };
+  tokens.total = tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite;
+  const modelTotal = seed.models.reduce((sum, model) => sum + model.tokens, 0) || 1;
+  return {
+    available: true,
+    days,
+    cost: Math.round(seed.cost * scale * 100) / 100,
+    tokens,
+    sessions: Math.max(1, Math.round(seed.sessions * scale)),
+    models: seed.models.map((model) => ({
+      name: model.name,
+      tokens: Math.round(model.tokens * scale),
+      cost: Math.round(model.cost * scale * 100) / 100,
+      share: model.tokens / modelTotal,
+    })),
+  };
+}
+
+const DEMO_DISK = {
+  demo_lumen: {
+    categories: [
+      { id: "node_modules", label: "node_modules", bytes: 380 * MB, files: 9200, reclaimable: true, paths: ["node_modules/.pnpm/next@14.2.1/node_modules/next/dist/compiled/react-dom/cjs/react-dom.production.js", "node_modules/.pnpm/stripe@16.4.0/node_modules/stripe/lib/stripe.js"] },
+      { id: "build", label: "Build output", bytes: 62 * MB, files: 410, reclaimable: true, paths: [".next/static/chunks/pages/checkout-9f2c1a.js"] },
+      { id: "git", label: ".git", bytes: 41 * MB, files: 890, reclaimable: false, paths: [".git/objects/pack/pack-9f2c1a.idx"] },
+      { id: "caches", label: "Caches", bytes: 12 * MB, files: 140, reclaimable: true, paths: [".cache/imag-to-webp/shoot-04.webp"] },
+      { id: "source", label: "Source & assets", bytes: 28 * MB, files: 1600, reclaimable: false, paths: ["public/photos/holiday-shoot"] },
+    ],
+    children: [
+      { name: "node_modules", bytes: 380 * MB, isDir: true },
+      { name: ".next", bytes: 62 * MB, isDir: true },
+      { name: ".git", bytes: 41 * MB, isDir: true },
+      { name: "public", bytes: 22 * MB, isDir: true },
+      { name: ".cache", bytes: 12 * MB, isDir: true },
+      { name: "app", bytes: 4 * MB, isDir: true },
+      { name: "package-lock.json", bytes: 640 * 1024, isDir: false },
+      { name: "README.md", bytes: 12 * 1024, isDir: false },
+    ],
+  },
+  demo_orbit: {
+    categories: [
+      { id: "vendor", label: "vendor", bytes: 205 * MB, files: 6100, reclaimable: true, paths: ["vendor/laravel/framework/src/Illuminate/Support/Collection.php"] },
+      { id: "node_modules", label: "node_modules", bytes: 148 * MB, files: 4300, reclaimable: true, paths: ["node_modules/vue/dist/vue.runtime.esm-bundler.js"] },
+      { id: "git", label: ".git", bytes: 33 * MB, files: 720, reclaimable: false, paths: [".git/objects/pack/pack-41bd77.idx"] },
+      { id: "source", label: "Source & assets", bytes: 44 * MB, files: 2900, reclaimable: false, paths: ["resources/js/pages/Pipeline.vue"] },
+    ],
+    children: [
+      { name: "vendor", bytes: 205 * MB, isDir: true },
+      { name: "node_modules", bytes: 148 * MB, isDir: true },
+      { name: "app", bytes: 31 * MB, isDir: true },
+      { name: ".git", bytes: 33 * MB, isDir: true },
+      { name: "resources", bytes: 9 * MB, isDir: true },
+      { name: "storage", bytes: 3 * MB, isDir: true },
+      { name: "composer.lock", bytes: 420 * 1024, isDir: false },
+      { name: "fly.toml", bytes: 2 * 1024, isDir: false },
+    ],
+  },
+  demo_tidepool: {
+    categories: [
+      { id: "git", label: ".git", bytes: 25 * MB, files: 540, reclaimable: false, paths: [".git/objects/pack/pack-08ac19.idx"] },
+      { id: "source", label: "Source & assets", bytes: 71 * MB, files: 1560, reclaimable: false, paths: ["internal/stations/import.go"] },
+    ],
+    children: [
+      { name: ".git", bytes: 25 * MB, isDir: true },
+      { name: "internal", bytes: 48 * MB, isDir: true },
+      { name: "migrations", bytes: 12 * MB, isDir: true },
+      { name: "cmd", bytes: 6 * MB, isDir: true },
+      { name: "go.mod", bytes: 3 * 1024, isDir: false },
+      { name: "render.yaml", bytes: 1 * 1024, isDir: false },
+    ],
+  },
+  demo_fieldnotes: {
+    categories: [
+      { id: "node_modules", label: "node_modules", bytes: 505 * MB, files: 11_200, reclaimable: true, paths: ["node_modules/react-native/Libraries/Components/View/View.js"] },
+      { id: "git", label: ".git", bytes: 58 * MB, files: 1100, reclaimable: false, paths: [".git/objects/pack/pack-77e0c2.idx"] },
+      { id: "build", label: "Build output", bytes: 42 * MB, files: 300, reclaimable: true, paths: ["build/ExponentPhotos.p12"] },
+      { id: "source", label: "Source & assets", bytes: 31 * MB, files: 2100, reclaimable: false, paths: ["assets/survey-icons"] },
+    ],
+    children: [
+      { name: "node_modules", bytes: 505 * MB, isDir: true },
+      { name: ".git", bytes: 58 * MB, isDir: true },
+      { name: "build", bytes: 42 * MB, isDir: true },
+      { name: "assets", bytes: 24 * MB, isDir: true },
+      { name: "src", bytes: 6 * MB, isDir: true },
+      { name: "app.json", bytes: 4 * 1024, isDir: false },
+    ],
+  },
+  demo_paperkite: {
+    categories: [
+      { id: "node_modules", label: "node_modules", bytes: 152 * MB, files: 5200, reclaimable: true, paths: ["node_modules/astro/dist/core/app/index.js"] },
+      { id: "git", label: ".git", bytes: 18 * MB, files: 480, reclaimable: false, paths: [".git/objects/pack/pack-3b9d44.idx"] },
+      { id: "build", label: "Build output", bytes: 9 * MB, files: 190, reclaimable: true, paths: ["dist/_astro/Tooltip.hash.js"] },
+      { id: "source", label: "Source & assets", bytes: 9 * MB, files: 1460, reclaimable: false, paths: ["src/content/docs/tooltip.mdx"] },
+    ],
+    children: [
+      { name: "node_modules", bytes: 152 * MB, isDir: true },
+      { name: ".git", bytes: 18 * MB, isDir: true },
+      { name: "dist", bytes: 9 * MB, isDir: true },
+      { name: "src", bytes: 7 * MB, isDir: true },
+      { name: "package.json", bytes: 2 * 1024, isDir: false },
+      { name: "wrangler.toml", bytes: 1 * 1024, isDir: false },
+    ],
+  },
+  demo_northwind: {
+    categories: [
+      { id: "git", label: ".git", bytes: 11 * MB, files: 300, reclaimable: false, paths: [".git/objects/pack/pack-50f1a8.idx"] },
+      { id: "caches", label: "Caches", bytes: 2 * MB, files: 60, reclaimable: true, paths: [".cache/thumbnails/studio-front.webp"] },
+      { id: "source", label: "Source & assets", bytes: 51 * MB, files: 1510, reclaimable: false, paths: ["wp-content/themes/northwind/blocks/hero"] },
+    ],
+    children: [
+      { name: "wp-content", bytes: 47 * MB, isDir: true },
+      { name: ".git", bytes: 11 * MB, isDir: true },
+      { name: ".cache", bytes: 2 * MB, isDir: true },
+      { name: "wp-config.php", bytes: 4 * 1024, isDir: false },
+    ],
+  },
+};
+
+/** Disk breakdown per project; numbers fit the board's invented sizes. */
+function demoDisk(projectId: string) {
+  const seed = DEMO_DISK[projectId] ?? DEMO_DISK.demo_lumen;
+  const total = seed.categories.reduce((sum, category) => sum + category.bytes, 0);
+  const files = seed.categories.reduce((sum, category) => sum + category.files, 0);
+  return {
+    available: true,
+    total,
+    files,
+    truncated: false,
+    categories: seed.categories,
+    children: seed.children,
+    reclaimableBytes: seed.categories
+      .filter((category) => category.reclaimable)
+      .reduce((sum, category) => sum + category.bytes, 0),
   };
 }

@@ -8,8 +8,14 @@ project page with a GitHub-style activity graph and the plans and todos you stil
 
 ![The Project Atlas board: pinned and grouped project cards with icons, git health, certificate warnings and deployments](docs/screenshots/board.png)
 
+![The Minimal board: compact cards that keep every attention-driving chip](docs/screenshots/board-minimal.png)
+
+![The cross-project inbox: open todos and plan steps, oldest first](docs/screenshots/inbox.png)
+
+![The Spend tab: ranked token bars per project](docs/screenshots/spend.png)
+
 <p>
-  <img src="docs/screenshots/project.png" alt="A project page: agent activity, GitHub-style commit heatmap, deployments with certificate expiry, plans and todos" width="62%" />
+  <img src="docs/screenshots/project.png" alt="A project page: agent activity, GitHub-style commit heatmap, deployments with certificate expiry, spend, disk breakdown, plans and todos" width="62%" />
   <img src="docs/screenshots/rail.png" alt="The same board in OpenChamber's right-hand rail" width="30%" />
 </p>
 
@@ -27,6 +33,14 @@ project metadata.
 
 - **Board** — a full-screen page, and the same board in the rail. Search, sort by "needs me",
   recent, name or size. Pin the important ones, group them into sections, hide the rest.
+  **Minimal** density keeps every attention-driving chip on a compact card.
+- **Inbox** — one tab with every open todo and plan step across projects, oldest first.
+  Filter by kind or project, group by project, click a row to open it. Read-only.
+- **Spend** — per-project model tokens (and cost when reported) on the project page and
+  as ranked bars on the Spend tab. Tokens are the honest metric; many setups report no cost.
+- **Disk** — the project page breaks the folder into `node_modules`, `vendor`, `.git`,
+  build output, caches, virtualenvs and source, names what is reclaimable, and reveals or
+  copies any row. Strictly read-only: nothing deletes.
 - **Real project icons** — the uploaded icon and colour from OpenChamber's project list, with
   a repo `favicon` and a coloured initial as fallbacks.
 - **Vitals** — branch, dirty file count, unpushed (`↑N`) / behind (`↓N`) commits, stale
@@ -38,7 +52,8 @@ project metadata.
   detection cannot know it.
 - **Project page** — click a project name: activity over 7 / 30 / 90 days, a 26-week
   **Commits** heatmap with streaks and the last commit, the **Deployments** panel with
-  recent-check dots and "down since", then the plans with open steps and the open
+  recent-check dots and "down since", the **Spend** panel (tokens, cost when reported,
+  model share) and the **Disk** breakdown, then the plans with open steps and the open
   todos.
 - **AI blurb** — two lines per project, written by your Small Model from the README, cached
   and regenerable.
@@ -104,7 +119,15 @@ network calls it makes.
 
 ## Using it
 
-- **The name** opens the project page; **← All projects** returns.
+- **The name** opens the project page; **← All projects** returns. Tabs switch between
+  **Board**, **Inbox** and **Spend**; the project page always renders in full.
+- **Normal | Minimal** switches card density. Minimal hides stats and descriptions but
+  never hides a problem: anything that drives "Needs me" stays on the card.
+- **Inbox** is your cross-project debt list: open todos and plan steps, oldest first.
+  Filter them, then click a row to open its project. It is read-only.
+- **Spend** shows model tokens per project (cost only when the setup reports one).
+- **Disk** breaks the folder into categories, names what is reclaimable, and reveals or
+  copies any row. It never deletes anything.
 - **☆/★** pins a card to the top; **+ group** files it into a named section.
   **Group: On/Off** in the header toggles the sections; **Hidden (N)** reveals archived
   projects so you can unhide them.

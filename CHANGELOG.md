@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0
+
+- **Density toggle** — header **Normal | Minimal** control (persisted). Minimal cards
+  hide the path, stats, stack, blurbs and site chips but never hide a problem: branch,
+  `±N` / `↑N` / `↓N` / stale-dirty / failed-turn chips, bad-cert and down-deployment
+  chips and the group chip stay, with one compact action row. Narrower columns fit more
+  cards; the project page always renders in full.
+- **Cross-project inbox** — header **Board | Inbox | Spend** tabs with a count badge.
+  `GET /inbox` reads every project's `context.json` plus plan markdown (open todos and
+  `- [ ]` steps, capped at 1000, cached 60 s). The Inbox view filters by kind/project,
+  sorts oldest-first, optionally groups by project, ages rows amber (14 d) and red
+  (45 d), and opens the project on click. Read-only: OpenChamber owns those lists.
+- **Spend per project** — `GET /spend` runs `opencode stats --cost --models` (at most two
+  stats processes at once, cached 5 min). Tokens are the primary metric; cost shows only
+  when greater than 0. The project page gains a **Spend** panel (token totals, stacked
+  model-share bar, legend, cache-read note) following the 7d/30d/90d toggle; the board
+  **Spend** tab ranks per-project bars with a progress hint, icon-coloured bars and a
+  total row.
+- **Disk breakdown** — `GET /disk` walks the project (same budget as size, cached 12 h)
+  and attributes every file to `node_modules`, `vendor`, `.git`, build output, caches,
+  virtualenvs or source, plus the 8 largest root children. The project page **Disk**
+  panel shows a stacked bar, a reclaimable line, and per-row **Reveal** / **Copy path**.
+  Reveal only accepts paths inside the project; the panel is strictly read-only.
+
 ## 0.5.0
 
 - **Git heatmap and health** — the project page gains a **Commits** panel (26-week

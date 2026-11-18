@@ -20,6 +20,17 @@ const params = new URLSearchParams(location.search);
 
 export function connectHost() {
   const storage = new Map<string, unknown>([...DEMO_SUMMARY_KEYS, ...DEMO_META_KEYS, ...DEMO_PROBE_KEYS]);
+  // Demo URL params seed the same settings the real panel persists.
+  const view = params.get("view");
+  const density = params.get("density");
+  storage.set("atlas:v1:settings", {
+    ai: true,
+    groupOn: true,
+    collapsed: {},
+    showHidden: false,
+    density: density === "minimal" ? "minimal" : "normal",
+    view: view === "inbox" || view === "spend" ? view : "board",
+  });
   const ok = async () => undefined;
 
   return {
