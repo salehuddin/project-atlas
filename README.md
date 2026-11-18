@@ -6,12 +6,14 @@ project page with a GitHub-style activity graph and the plans and todos you stil
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-![The Project Atlas board: one card per project with its icon, vitals, deployments and a blurb](docs/screenshots/board.png)
+![The Project Atlas board: pinned and grouped project cards with icons, git health, certificate warnings and deployments](docs/screenshots/board.png)
 
 <p>
-  <img src="docs/screenshots/project.png" alt="A project page: 30-day activity chart, plans with progress, open todos" width="62%" />
+  <img src="docs/screenshots/project.png" alt="A project page: agent activity, GitHub-style commit heatmap, deployments with certificate expiry, plans and todos" width="62%" />
   <img src="docs/screenshots/rail.png" alt="The same board in OpenChamber's right-hand rail" width="30%" />
 </p>
+
+![A project with a failing deployment: staging is unreachable and shows how long it has been down](docs/screenshots/project-alerts.png)
 
 <sub>Screenshots use invented demo projects, rendered by the real panel code through
 [a mock host](docs/DEVELOPMENT.md#screenshots). Light theme: [board-light.png](docs/screenshots/board-light.png).</sub>

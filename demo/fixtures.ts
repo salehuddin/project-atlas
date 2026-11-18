@@ -547,25 +547,75 @@ function activity(projectId: string, days: number) {
     streak,
     cost: 0,
     points,
-    knowledge: {
+    knowledge: knowledgeFor(projectId),
+  };
+}
+
+/** Plans and todos per demo project, so each project page reads as its own project. */
+function knowledgeFor(projectId: string) {
+  const todo = (text: string, days: number) => ({ text, createdAt: Date.now() - days * DAY });
+  const plan = (id: string, title: string, total: number, done: number) => ({
+    id,
+    file: `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`,
+    title,
+    total,
+    done,
+    open: total - done,
+  });
+
+  if (projectId === "demo_paperkite") {
+    return {
+      available: true,
+      openTodos: 5,
+      doneTodos: 9,
+      notes: 0,
+      todos: [
+        todo("Fix the staging deploy before the Tooltip docs go out", 1),
+        todo("Add keyboard shortcuts to the component playground", 2),
+        todo("Write the migration guide for the 2.0 token names", 4),
+        todo("Check colour contrast on every dark-theme example", 7),
+      ],
+      plans: [
+        plan("p1", "Component playground with live previews", 8, 5),
+        plan("p2", "Design token migration guide", 5, 1),
+        plan("p3", "Search across the docs", 4, 4),
+      ],
+    };
+  }
+
+  if (projectId === "demo_lumen") {
+    return {
       available: true,
       openTodos: 7,
       doneTodos: 12,
       notes: 0,
       todos: [
-        { text: "Send order-ready SMS when a pickup slot is confirmed", createdAt: Date.now() - 2 * DAY },
-        { text: "Show allergen warnings on the cart page, not only the product page", createdAt: Date.now() - 3 * DAY },
-        { text: "Replace the placeholder hero photo with the new bakery shoot", createdAt: Date.now() - 6 * DAY },
-        { text: "Load-test checkout before the holiday menu goes live", createdAt: Date.now() - 8 * DAY },
-        { text: "Move image uploads to signed URLs", createdAt: Date.now() - 9 * DAY },
+        todo("Send order-ready SMS when a pickup slot is confirmed", 2),
+        todo("Show allergen warnings on the cart page, not only the product page", 3),
+        todo("Replace the placeholder hero photo with the new bakery shoot", 6),
+        todo("Load-test checkout before the holiday menu goes live", 8),
+        todo("Move image uploads to signed URLs", 9),
       ],
       plans: [
-        { id: "p1", file: "online-ordering-and-pickup-slots.md", title: "Online ordering and pickup slots", total: 9, done: 5, open: 4 },
-        { id: "p2", file: "allergen-labels.md", title: "Allergen labels on every product", total: 4, done: 3, open: 1 },
-        { id: "p3", file: "admin-order-board.md", title: "Admin order board for the kitchen", total: 6, done: 1, open: 5 },
-        { id: "p4", file: "holiday-menu-landing-page.md", title: "Holiday menu landing page", total: 6, done: 6, open: 0 },
+        plan("p1", "Online ordering and pickup slots", 9, 5),
+        plan("p2", "Allergen labels on every product", 4, 3),
+        plan("p3", "Admin order board for the kitchen", 6, 1),
+        plan("p4", "Holiday menu landing page", 6, 6),
       ],
-    },
+    };
+  }
+
+  return {
+    available: true,
+    openTodos: 3,
+    doneTodos: 6,
+    notes: 0,
+    todos: [
+      todo("Review the open pull requests", 2),
+      todo("Update the README with the new setup steps", 5),
+      todo("Plan the next release", 9),
+    ],
+    plans: [plan("p1", "Next release", 6, 3), plan("p2", "Cleanup and refactors", 5, 2)],
   };
 }
 
@@ -581,6 +631,16 @@ const GIT_SUBJECTS = [
   "feat: allergen labels on every product card",
   "fix: tooltip overflow on narrow viewports",
 ];
+
+const SUBJECTS: Record<string, string[]> = {
+  demo_paperkite: [
+    "docs: document the Tooltip component",
+    "fix: tooltip overflow on narrow viewports",
+    "feat: live preview for the Button variants",
+    "chore: pin the Astro and MDX versions",
+    "docs: add a dark-theme example to Card",
+  ],
+};
 
 /** Seeded 182-day commit series with a realistic weekday rhythm. */
 function gitHistory(projectId: string) {
@@ -615,7 +675,7 @@ function gitHistory(projectId: string) {
       const at = new Date(`${days[index].date}T15:24:00`).getTime();
       lastCommit = {
         hash: Math.floor(rng() * 0xffffff).toString(16).padStart(6, "0").slice(0, 7),
-        subject: GIT_SUBJECTS[Math.floor(rng() * GIT_SUBJECTS.length)],
+        subject: (SUBJECTS[projectId] ?? GIT_SUBJECTS)[Math.floor(rng() * (SUBJECTS[projectId] ?? GIT_SUBJECTS).length)],
         at,
       };
       break;
