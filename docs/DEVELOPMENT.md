@@ -1,0 +1,84 @@
+# Development
+
+## Setup
+
+```sh
+npm ci
+npm run build
+```
+
+`npm run build` writes `panel/main.js` (IIFE), `service/main.js` (CommonJS) and copies
+`src/panel/index.html` to `panel/index.html`. The built files are committed on purpose:
+OpenChamber never compiles an extension, so a Git install runs them as they are.
+
+## Scripts
+
+| Script | What it does |
+| --- | --- |
+| `npm run build` | esbuild both entries and copy the HTML |
+| `npm run check` | parses the manifest with `@openchamber/sdk/schemas` and checks the built files exist |
+| `npm test` | TypeScript typecheck, no emit |
+| `npm run smoke -- <folder> [projectId]` | starts the service and prints real data for a folder |
+
+`smoke` also reads `SMOKE_DIRS` (path-delimited) and `SMOKE_PROJECT_ID`. With a project id it
+prints activity and plans; without one, just vitals and icons.
+
+The smoke run does not need OpenChamber: it sets its own port and token and talks to the
+service directly.
+
+## Layout
+
+```
+src/panel/main.ts      board, project page, chart
+src/panel/index.html   markup and CSS (--oc-* theme variables)
+src/service/main.ts    local service and all filesystem work
+scripts/               build, manifest check, smoke
+panel/, service/       build output (committed)
+```
+
+The panel has no framework: DOM helpers, an event-delegated click handler, and a re-render on
+state changes. Keep it that way unless there is a strong reason; the bundle is loaded in a
+sandboxed iframe on every open.
+
+## Manifest notes
+
+- The manifest lives under `openchamber` in `package.json`.
+- `contributes.panel.id`, `name` and `icon` belong **inside** `contributes.panel` for the
+  2.7.x schema. Older docs show them at the top level; the schema wins.
+- `page: true` reuses the panel entry as the full-screen page.
+- Capabilities are `sessions`, `prompt`, `model`; the service adds `service` automatically.
+- Bump `version` for updates. Git installs compare it.
+
+## Adding a data source
+
+1. Add the read to `src/service/main.ts`, behind `safeDir()` and with a cache.
+2. Send it in `/vitals` if it belongs on a card, or a new route if it is large.
+3. Add the field to the panel's `Vitals` type and to `buildMeta` / the project page.
+4. Run `npm test`, `npm run build`, `npm run check`, then the smoke script.
+
+Anything that writes, deletes, or touches a path outside the project needs a deliberate
+decision; the extension is read-only by design.
+
+## Debugging
+
+```sh
+PORT=34567 TOKEN=dev node service/main.js
+curl -H "Authorization: Bearer dev" "http://127.0.0.1:34567/vitals?directory=$(pwd)"
+```
+
+On Windows use PowerShell or Git Bash with the same env. The service logs nothing by default;
+it answers errors as JSON with a status code.
+
+The panel can be debugged from OpenChamber's developer tools: the frame is a normal page, and
+`HostRequestError.code` tells you whether the problem is permission (`NOT_GRANTED`), the
+service (`NO_SERVICE`), or the call.
+
+## Releasing
+
+1. Bump `version` in `package.json`.
+2. Add an entry to `CHANGELOG.md`.
+3. `npm run build && npm run check`
+4. Commit the source **and** the built files.
+5. Push and tag: `git tag v0.5.0 && git push --tags`.
+
+OpenChamber checks git installs for a higher `version` and offers the update.

@@ -1,0 +1,69 @@
+{
+  "name": "project-atlas",
+  "version": "0.4.0",
+  "description": "A project cockpit for OpenChamber: every project on one board, with its real icon, deployments, activity graph, plans and open todos.",
+  "license": "MIT",
+  "author": "Salehuddin",
+  "homepage": "https://github.com/salehuddin/project-atlas#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/salehuddin/project-atlas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/salehuddin/project-atlas/issues"
+  },
+  "keywords": [
+    "openchamber",
+    "opencode",
+    "extension",
+    "dashboard",
+    "projects"
+  ],
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.7.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "project-atlas",
+        "name": "Project Atlas",
+        "icon": "folders",
+        "entry": "panel/index.html",
+        "mobile": true
+      },
+      "page": true,
+      "capabilities": [
+        "sessions",
+        "prompt",
+        "model"
+      ],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "exec": [
+            "git",
+            "explorer",
+            "open",
+            "xdg-open"
+          ]
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/check.mjs",
+    "test": "tsc --noEmit",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@openchamber/sdk": "2.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}
