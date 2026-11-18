@@ -56,7 +56,9 @@
     "build": "node scripts/build.mjs",
     "check": "node scripts/check.mjs",
     "test": "tsc --noEmit",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "demo:build": "node demo/build.mjs",
+    "screenshots": "npm run demo:build && node demo/screenshot.mjs"
   },
   "dependencies": {
     "@openchamber/sdk": "2.7.2"

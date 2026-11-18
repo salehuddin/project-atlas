@@ -6,6 +6,16 @@ project page with a GitHub-style activity graph and the plans and todos you stil
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
+![The Project Atlas board: one card per project with its icon, vitals, deployments and a blurb](docs/screenshots/board.png)
+
+<p>
+  <img src="docs/screenshots/project.png" alt="A project page: 30-day activity chart, plans with progress, open todos" width="62%" />
+  <img src="docs/screenshots/rail.png" alt="The same board in OpenChamber's right-hand rail" width="30%" />
+</p>
+
+<sub>Screenshots use invented demo projects, rendered by the real panel code through
+[a mock host](docs/DEVELOPMENT.md#screenshots). Light theme: [board-light.png](docs/screenshots/board-light.png).</sub>
+
 Project Atlas is an OpenChamber extension: a sandboxed panel and a small local service. The
 panel draws the board and never touches your disk; the service does the things a web page
 cannot — `git`, a recursive disk walk, deployment checks, and reading OpenChamber's own

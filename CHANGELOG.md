@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- README screenshots, generated from invented projects by a demo harness (`demo/`) that runs
+  the real panel against a mock host. `npm run screenshots` regenerates them.
+
 ## 0.4.0
 
 - Project page: click a project name to see 7/30/90-day activity, totals, plans and open
