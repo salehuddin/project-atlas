@@ -8,21 +8,7 @@ project page with a GitHub-style activity graph and the plans and todos you stil
 
 ![The Project Atlas board: pinned and grouped project cards with icons, git health, certificate warnings and deployments](docs/screenshots/board.png)
 
-![The Minimal board: compact cards that keep every attention-driving chip](docs/screenshots/board-minimal.png)
-
-![The cross-project inbox: open todos and plan steps, oldest first](docs/screenshots/inbox.png)
-
-![The Spend tab: ranked token bars per project](docs/screenshots/spend.png)
-
-<p>
-  <img src="docs/screenshots/project.png" alt="A project page: agent activity, GitHub-style commit heatmap, deployments with certificate expiry, spend, disk breakdown, plans and todos" width="62%" />
-  <img src="docs/screenshots/rail.png" alt="The same board in OpenChamber's right-hand rail" width="30%" />
-</p>
-
-![A project with a failing deployment: staging is unreachable and shows how long it has been down](docs/screenshots/project-alerts.png)
-
-<sub>Screenshots use invented demo projects, rendered by the real panel code through
-[a mock host](docs/DEVELOPMENT.md#screenshots). Light theme: [board-light.png](docs/screenshots/board-light.png).</sub>
+<sub><b>The board.</b> One card per project, with its real icon, git health (<code>±3</code>, <code>↑2</code>, <code>dirty 5d</code>), deployments with certificate warnings, and an AI blurb. Pinned projects sit on top, the rest are grouped. More in the <a href="#tour">tour</a>.</sub>
 
 Project Atlas is an OpenChamber extension: a sandboxed panel and a small local service. The
 panel draws the board and never touches your disk; the service does the things a web page
@@ -59,6 +45,55 @@ project metadata.
   and regenerable.
 - **Actions** — resume the last chat, start a new one, open the folder, Files, Git, GitHub,
   a deployment, or copy the path.
+
+## Tour
+
+Every screenshot below uses invented demo projects, rendered by the real panel code through
+[a mock host](docs/DEVELOPMENT.md#screenshots). Nothing here is from a real workspace.
+
+### The board
+
+<table>
+  <tr>
+    <td width="50%" valign="top" align="center">
+      <img src="docs/screenshots/board-minimal.png" alt="The Minimal board: compact cards that keep every attention-driving chip" />
+      <br /><sub><b>Minimal density.</b> Paths, sizes, stack chips and blurbs are hidden; branch, unpushed or dirty changes, failed turns, down deployments and bad certificates stay.</sub>
+    </td>
+    <td width="50%" valign="top" align="center">
+      <img src="docs/screenshots/board-light.png" alt="The board in the light theme" />
+      <br /><sub><b>Light theme.</b> The panel follows OpenChamber's theme variables, so it matches whichever theme you run.</sub>
+    </td>
+  </tr>
+</table>
+
+### Across all projects
+
+![The cross-project inbox: open todos and plan steps, oldest first, with stale items in amber and red](docs/screenshots/inbox.png)
+
+<sub><b>Inbox.</b> Every open todo and plan step from every project in one list, oldest first. Amber after 14 days, red after 45. Filter by kind or project, group by project, click a row to open it. Read-only.</sub>
+
+![The Spend tab: ranked token bars per project with a 7, 30 and 90 day range](docs/screenshots/spend.png)
+
+<sub><b>Spend.</b> Model tokens per project over 7, 30 or 90 days. Tokens are the main figure; cost appears only for projects whose setup reports it.</sub>
+
+### One project
+
+<table>
+  <tr>
+    <td width="68%" valign="top" align="center">
+      <img src="docs/screenshots/project.png" alt="A project page: agent activity, commit heatmap, deployments with certificate expiry, spend, disk breakdown, plans and todos" />
+      <br /><sub><b>Project page.</b> Click a project name. From the top: agent activity, 26-week commit heatmap, deployments with certificate expiry, spend by model, disk breakdown, then plans and open todos.</sub>
+    </td>
+    <td width="32%" valign="top" align="center">
+      <img src="docs/screenshots/rail.png" alt="The same board in OpenChamber's right-hand rail" />
+      <br /><sub><b>In the rail.</b> The same board in a single column beside your chat.</sub>
+    </td>
+  </tr>
+</table>
+
+![A project with a failing deployment: staging is unreachable and shows how long it has been down](docs/screenshots/project-alerts.png)
+
+<sub><b>A failing deployment.</b> Staging is unreachable and shows how long it has been down, with a red history of recent checks. Checks are recorded while Atlas is open, not continuously.</sub>
 
 ## Requirements
 
